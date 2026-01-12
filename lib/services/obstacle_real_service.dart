@@ -1,3 +1,7 @@
+// This file is deprecated as we have moved to direct BLE communication.
+// Keeping it for reference but commented out to prevent compilation errors.
+
+/*
 import 'dart:async';
 import 'dart:io';
 import 'package:firebase_database/firebase_database.dart';
@@ -120,3 +124,4 @@ class ObstacleRealService {
     stopListening();
   }
 }
+*/

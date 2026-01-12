@@ -1,44 +1,25 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'pages/home_page.dart';
 
-import 'package:firebase_core/firebase_core.dart';
-
-import 'services/console_service.dart';
-
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  try {
-    ConsoleService().log("Initializing Firebase...");
-    await Firebase.initializeApp(
-      options: const FirebaseOptions(
-        apiKey: "AIzaSyCwfUETc5T001Wrl0XQfsHrYLwWarIKtzw",
-        appId: "1:435173981948:android:f10904f053671c8115a179",
-        messagingSenderId: "435173981948",
-        projectId: "navi-ai-indoor-navigation",
-        storageBucket: "navi-ai-indoor-navigation.firebasestorage.app",
-        databaseURL: "https://navi-ai-indoor-navigation-default-rtdb.asia-southeast1.firebasedatabase.app",
-      ),
-    );
-    ConsoleService().log("Firebase Initialized Successfully");
-  } catch (e) {
-    ConsoleService().log("Firebase Init Error: $e");
-  }
-  runApp(const MyApp());
+void main() {
+  runApp(const BlindNavApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class BlindNavApp extends StatelessWidget {
+  const BlindNavApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Vazhikaatti',
       debugShowCheckedModeBanner: false,
+      title: 'Vazhikaatti',
       theme: ThemeData(
-        primarySwatch: Colors.yellow,
-        brightness: Brightness.dark, // High contrast by default
+        brightness: Brightness.dark,
+        primarySwatch: Colors.blue,
         scaffoldBackgroundColor: Colors.black,
         useMaterial3: true,
+        fontFamily: 'Roboto', 
       ),
       home: const HomePage(),
     );

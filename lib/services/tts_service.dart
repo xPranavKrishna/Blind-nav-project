@@ -31,6 +31,13 @@ class TtsService {
     }
   }
 
+  Future<void> speakPrioritized(String text) async {
+    if (text.isNotEmpty) {
+      await _flutterTts.stop(); // Stop any current speech immediately
+      await _flutterTts.speak(text);
+    }
+  }
+
   Future<void> stop() async {
     await _flutterTts.stop();
     _isSpeaking = false;

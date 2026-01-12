@@ -1,13 +1,23 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:vibration/vibration.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'connection_page.dart';
 import '../services/speech_service.dart';
 import '../services/tts_service.dart';
 import '../services/navigation_demo_service.dart';
-import '../services/obstacle_real_service.dart';
 import '../services/emergency_service.dart';
 import '../services/console_service.dart';
+
+const String SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const String DISTANCE_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+const String DETECTED_UUID = "1c95d5e3-d8f7-413a-bf3d-7d3d14a81bf0";
+const String TIMESTAMP_UUID = "d8f7125f-b267-4e20-bee0-1a951a1ac307";
+const String PREF_BONDED_DEVICE_ID = "bonded_device_id";
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -20,7 +30,7 @@ class _HomePageState extends State<HomePage> {
   final SpeechService _speechService = SpeechService();
   final TtsService _ttsService = TtsService();
   final NavigationDemoService _navigationService = NavigationDemoService();
-  final ObstacleRealService _obstacleService = ObstacleRealService();
+  // final ObstacleRealService _obstacleService = ObstacleRealService(); // Deprecated
   final EmergencyService _emergencyService = EmergencyService();
 
   String _currentAction = "Ready";
@@ -30,9 +40,22 @@ class _HomePageState extends State<HomePage> {
   bool _isNavigating = false;
   bool _isObstacle = false;
   
+  // BLE State
+  BluetoothDevice? _connectedDevice;
+  String _connectionStatus = "Disconnected";
+  bool _isConnected = false;
+  int _distance = 0;
+  DateTime _lastAlertTime = DateTime.fromMillisecondsSinceEpoch(0);
+  
   StreamSubscription? _commandSubscription;
   StreamSubscription? _navigationSubscription;
-  StreamSubscription? _obstacleSubscription;
+  StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
+  StreamSubscription<List<int>>? _distanceSubscription;
+  StreamSubscription<List<int>>? _detectedSubscription;
+  StreamSubscription<List<int>>? _timestampSubscription;
+  
+  Timer? _reconnectionTimer;
+  bool _isConnecting = false;
 
   @override
   void initState() {
@@ -55,24 +78,9 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    _obstacleSubscription = _obstacleService.obstacleStream.listen((isObstacle) {
-      if (isObstacle) {
-        // Only alert if we weren't already in obstacle state
-        if (!_isObstacle) {
-          _handleObstacle();
-        }
-      } else {
-        // Only clear if we were in obstacle state
-        if (_isObstacle) {
-           _isObstacle = false;
-           _speak("Obstacle cleared. Resuming.");
-           setState(() {});
-        }
-      }
-    });
-    
-    // Start listening immediately for "Always On" detection
-    _obstacleService.startListening();
+    // Auto-connect to BLE
+    _checkPermissionsAndAutoConnect();
+
 
     _commandSubscription = _speechService.commandStream.listen(_handleCommand);
     _speechService.listeningStream.listen((isListening) {
@@ -94,11 +102,252 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _requestPermissions() async {
+    // Basic permissions
     await [
       Permission.microphone,
       Permission.phone,
-      Permission.location, // For future use
+      Permission.location,
     ].request();
+  }
+
+  Future<void> _checkPermissionsAndAutoConnect() async {
+    if (Platform.isAndroid) {
+      Map<Permission, PermissionStatus> statuses = await [
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.location,
+      ].request();
+      
+      if (statuses.values.any((status) => status.isDenied || status.isPermanentlyDenied)) {
+         ConsoleService().log("Bluetooth permissions denied");
+         // Don't block app, just show status
+      }
+    }
+
+    // Auto-reconnect
+    final prefs = await SharedPreferences.getInstance();
+    final String? bondedDeviceId = prefs.getString(PREF_BONDED_DEVICE_ID);
+
+    if (bondedDeviceId != null) {
+      ConsoleService().log("Found saved device ID: $bondedDeviceId");
+      _startReconnectionLoop(bondedDeviceId);
+    }
+  }
+
+  void _startReconnectionLoop(String deviceId) {
+    _reconnectionTimer?.cancel();
+    _reconnectionTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+      if (_isConnected || _isConnecting) return;
+
+      ConsoleService().log("Aggressive Reconnect: Trying to connect...");
+      try {
+        // Try to find in bonded list first (most reliable)
+        List<BluetoothDevice> bondedDevices = await FlutterBluePlus.bondedDevices;
+        try {
+          BluetoothDevice device = bondedDevices.firstWhere((d) => d.remoteId.str == deviceId);
+          await _connectToDevice(device, isAutoConnect: true);
+        } catch (e) {
+           // Fallback
+           BluetoothDevice device = BluetoothDevice.fromId(deviceId);
+           await _connectToDevice(device, isAutoConnect: true);
+        }
+      } catch (e) {
+        ConsoleService().log("Reconnection loop error: $e");
+      }
+    });
+  }
+
+  Future<void> _connectToDevice(BluetoothDevice device, {bool isAutoConnect = false}) async {
+    if (_isConnecting) return;
+
+    setState(() {
+      _connectionStatus = "Connecting...";
+      _isConnecting = true;
+    });
+    ConsoleService().log("Connecting to ${device.platformName} (Auto: $isAutoConnect)...");
+
+    try {
+      // Connect
+      // autoConnect: true allows background reconnection on Android
+      await device.connect(autoConnect: isAutoConnect); 
+      
+      if (!isAutoConnect) {
+        // Only wait if manual connection, otherwise let it happen in background
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+
+      // Check Bond State
+      if (Platform.isAndroid) {
+        var bondState = await device.bondState.first;
+        if (bondState == BluetoothBondState.bonded) {
+           ConsoleService().log("Device already bonded.");
+        } else {
+           ConsoleService().log("Device not bonded. Attempting to bond...");
+           try {
+             await device.createBond();
+           } catch (e) {
+             ConsoleService().log("Bonding failed/skipped: $e");
+           }
+        }
+      }
+
+      _connectionStateSubscription = device.connectionState.listen((state) {
+        if (state == BluetoothConnectionState.connected) {
+          setState(() {
+            _isConnected = true;
+            _connectionStatus = "Connected";
+            _connectedDevice = device;
+          });
+          _saveBondedDevice(device.remoteId.str);
+          _discoverServices(device);
+          _speak("Device connected");
+        } else if (state == BluetoothConnectionState.disconnected) {
+          setState(() {
+            _isConnected = false;
+            _connectionStatus = "Disconnected";
+            _connectedDevice = null;
+          });
+          _speak("Device disconnected");
+        }
+      });
+
+    } catch (e) {
+      setState(() {
+        _connectionStatus = "Failed";
+        _isConnecting = false;
+      });
+      ConsoleService().log("Connection failed: $e");
+    } finally {
+      setState(() {
+        _isConnecting = false;
+      });
+    }
+  }
+
+  Future<void> _discoverServices(BluetoothDevice device) async {
+    try {
+      List<BluetoothService> services = await device.discoverServices();
+      BluetoothService? targetService;
+      try {
+        targetService = services.firstWhere((s) => s.uuid.toString() == SERVICE_UUID);
+      } catch (e) {
+        ConsoleService().log("Service not found");
+        return;
+      }
+
+      for (BluetoothCharacteristic c in targetService.characteristics) {
+        if (c.uuid.toString() == DISTANCE_UUID) {
+          await c.setNotifyValue(true);
+          _distanceSubscription = c.onValueReceived.listen((value) {
+            _processDistance(value);
+          });
+        } else if (c.uuid.toString() == DETECTED_UUID) {
+          await c.setNotifyValue(true);
+          _detectedSubscription = c.onValueReceived.listen((value) {
+            _processDetected(value);
+          });
+        }
+      }
+    } catch (e) {
+      ConsoleService().log("Discovery failed: $e");
+    }
+  }
+
+  void _processDistance(List<int> value) {
+    if (value.length >= 4) {
+      ByteData byteData = ByteData.sublistView(Uint8List.fromList(value));
+      int dist = byteData.getInt32(0, Endian.little);
+      setState(() {
+        _distance = dist;
+      });
+      // Alert logic is handled in _processDetected or _handleAlerts
+    }
+  }
+
+  void _processDetected(List<int> value) {
+    if (value.isNotEmpty) {
+      bool newDetection = value[0] == 1;
+      if (newDetection && !_isObstacle) {
+         _handleObstacle();
+      } else if (!newDetection && _isObstacle) {
+         setState(() {
+           _isObstacle = false;
+         });
+         _speak("Path clear");
+      }
+    }
+  }
+
+  Future<void> _saveBondedDevice(String id) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(PREF_BONDED_DEVICE_ID, id);
+  }
+
+  Future<void> _scanAndConnect() async {
+    final BluetoothDevice? device = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const ConnectionPage()),
+    );
+
+    if (device != null) {
+      // Device is already connected by ConnectionPage
+      setState(() {
+        _isConnected = true;
+        _connectionStatus = "Connected";
+        _connectedDevice = device;
+      });
+      _discoverServices(device);
+      _speak("Device connected");
+      _saveBondedDevice(device.remoteId.str); // Ensure saved
+      _startReconnectionLoop(device.remoteId.str); // Start loop for future
+      
+      // Listen to disconnection
+      _connectionStateSubscription?.cancel();
+      _connectionStateSubscription = device.connectionState.listen((state) {
+        if (state == BluetoothConnectionState.disconnected) {
+           _handleDisconnection();
+        }
+      });
+    }
+  }
+
+  void _handleDisconnection() {
+    setState(() {
+      _isConnected = false;
+      _connectionStatus = "Disconnected";
+      _connectedDevice = null;
+    });
+    _speak("Device disconnected");
+  }
+
+  Future<void> _disconnect() async {
+    _reconnectionTimer?.cancel(); // Stop aggressive reconnect on manual disconnect
+    if (_connectedDevice != null) {
+      await _connectedDevice!.disconnect();
+    }
+  }
+
+  Future<void> _forgetDevice() async {
+    _reconnectionTimer?.cancel();
+    await _disconnect();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(PREF_BONDED_DEVICE_ID);
+    
+    // Try to remove bond if possible (Android only)
+    if (Platform.isAndroid && _connectedDevice != null) {
+      try {
+        await _connectedDevice!.removeBond();
+      } catch (e) {
+        ConsoleService().log("Could not remove bond: $e");
+      }
+    }
+    
+    setState(() {
+      _connectedDevice = null;
+      _isConnected = false;
+      _connectionStatus = "Disconnected";
+    });
+    _speak("Device forgotten");
   }
 
   // Wrapper to handle TTS and STT coordination
@@ -106,6 +355,11 @@ class _HomePageState extends State<HomePage> {
     _speechService.pauseListening(); // Stop listening while speaking
     await _ttsService.speak(text);
     // Do NOT auto-resume listening. User must tap.
+  }
+
+  Future<void> _speakPrioritized(String text) async {
+    _speechService.pauseListening();
+    await _ttsService.speakPrioritized(text);
   }
 
   void _handleCommand(String command) {
@@ -174,29 +428,34 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _handleObstacle() async {
-    ConsoleService().log("Obstacle Detected! triggering Alert & Vibration");
-    _isObstacle = true;
-    setState(() {});
-    _speak("Obstacle ahead. Please stop.");
+    if (DateTime.now().difference(_lastAlertTime).inMilliseconds < 2000) return;
+    
+    ConsoleService().log("Obstacle Detected! Distance: $_distance cm");
+    setState(() {
+      _isObstacle = true;
+    });
+    
+    // STOP Navigation speech immediately and announce obstacle
+    _speakPrioritized("Obstacle ahead at $_distance centimeters.");
     
     bool? hasVibrator = await Vibration.hasVibrator();
-    ConsoleService().log("Device has vibrator? $hasVibrator");
-    
     if (hasVibrator ?? false) {
-      ConsoleService().log("Vibrating now...");
-      Vibration.vibrate(duration: 1000); // Vibrate for 1 second
-    } else {
-      ConsoleService().log("Vibration NOT supported/available");
+      Vibration.vibrate(duration: 500);
     }
+    _lastAlertTime = DateTime.now();
   }
 
   @override
   void dispose() {
     _speechService.dispose();
-    _obstacleService.dispose();
+    // _obstacleService.dispose();
     _commandSubscription?.cancel();
     _navigationSubscription?.cancel();
-    _obstacleSubscription?.cancel();
+    _connectionStateSubscription?.cancel();
+    _distanceSubscription?.cancel();
+    _detectedSubscription?.cancel();
+    _timestampSubscription?.cancel();
+    _reconnectionTimer?.cancel();
     super.dispose();
   }
 
@@ -233,14 +492,32 @@ class _HomePageState extends State<HomePage> {
             "Vazhikaatti",
             style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
           ),
+
           const Spacer(),
+          // Connection Status Icon
+          IconButton(
+            icon: Icon(
+              _isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+              color: _isConnected ? Colors.blue : Colors.grey,
+            ),
+            onPressed: _isConnected ? _disconnect : _scanAndConnect,
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, color: Colors.white),
             onSelected: (value) {
-              // Handle menu
+              if (value == "connect") {
+                _isConnected ? _disconnect() : _scanAndConnect();
+              } else if (value == "forget") {
+                _forgetDevice();
+              }
             },
             itemBuilder: (context) => [
+              PopupMenuItem(
+                value: "connect", 
+                child: Text(_isConnected ? "Disconnect" : "Connect Device")
+              ),
               const PopupMenuItem(value: "settings", child: Text("Settings")),
+              const PopupMenuItem(value: "forget", child: Text("Forget Device")),
               const PopupMenuItem(value: "caretaker", child: Text("Add Caretaker")),
               const PopupMenuItem(value: "about", child: Text("About")),
             ],
