@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "435173981948",
+    "project_id": "navi-ai-indoor-navigation",
+    "storage_bucket": "navi-ai-indoor-navigation.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:435173981948:android:f10904f053671c8115a179",
+        "android_client_info": {
+          "package_name": "com.example.naviai"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCwfUETc5T001Wrl0XQfsHrYLwWarIKtzw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
