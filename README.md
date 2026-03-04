@@ -1,6 +1,6 @@
 # Vazhikaatti (AI Blind Navigation Assistant)
 
-Vazhikaatti (Tamil for "Guide") is an intelligent Android mobile application specifically designed to assist visually impaired individuals with independent navigation. It integrates advanced artificial intelligence, Bluetooth Low Energy (BLE) wearables, and cloud infrastructure to deliver real-time environmental awareness, directional guidance, and safety features.
+Vazhikaatti (Malayalam for "Guide") is an intelligent Android mobile application specifically designed to assist visually impaired individuals with independent navigation. It integrates advanced artificial intelligence, Bluetooth Low Energy (BLE) wearables, and cloud infrastructure to deliver real-time environmental awareness, directional guidance, and safety features.
 
 ## Key Features
 
