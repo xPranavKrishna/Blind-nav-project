@@ -10,6 +10,7 @@ import 'connection_page.dart';
 import '../services/speech_service.dart';
 import '../services/tts_service.dart';
 import '../services/navigation_demo_service.dart';
+import '../beacon_service.dart';
 import '../services/emergency_service.dart';
 import '../services/console_service.dart';
 
@@ -30,6 +31,7 @@ class _HomePageState extends State<HomePage> {
   final SpeechService _speechService = SpeechService();
   final TtsService _ttsService = TtsService();
   final NavigationDemoService _navigationService = NavigationDemoService();
+  final BeaconNavigationService _beaconService = BeaconNavigationService();
   // final ObstacleRealService _obstacleService = ObstacleRealService(); // Deprecated
   final EmergencyService _emergencyService = EmergencyService();
 
@@ -77,6 +79,9 @@ class _HomePageState extends State<HomePage> {
         _statusText = "Microphone not available";
       });
     }
+
+    // Start indoor beacon scanning for navigation
+    _beaconService.startScanning();
 
     // Auto-connect to BLE
     _checkPermissionsAndAutoConnect();
@@ -391,7 +396,15 @@ class _HomePageState extends State<HomePage> {
     _speak("Starting navigation to $destination");
     // _obstacleService.startListening(); // Already listening globally
 
-    _navigationSubscription = _navigationService.startNavigation(destination).listen((step) {
+    // Route to new beacon service if it's an indoor room, else default to demo
+    final destLower = destination.toLowerCase();
+    final isIndoor = ["entrance", "hallway", "room 1", "room1"].any((r) => destLower.contains(r));
+
+    final navStream = isIndoor 
+        ? _beaconService.startNavigation(destination)
+        : _navigationService.startNavigation(destination);
+
+    _navigationSubscription = navStream.listen((step) {
       if (_isObstacle) return; // Pause updates if obstacle
 
       setState(() {
@@ -399,6 +412,7 @@ class _HomePageState extends State<HomePage> {
         _currentDescription = step['description'];
         _directionIcon = step['direction'];
       });
+      // Speech might have been interrupted by obstacle. We check _isObstacle above.
       _speak(step['description']);
     }, onDone: () {
       setState(() {
@@ -415,6 +429,7 @@ class _HomePageState extends State<HomePage> {
 
   void _stopNavigation() {
     _navigationService.stopNavigation();
+    _beaconService.stopNavigation();
     _navigationSubscription?.cancel();
     // _obstacleService.stopListening(); // Keep listening globally
     setState(() {
@@ -448,6 +463,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _speechService.dispose();
+    _beaconService.stopScanning();
     // _obstacleService.dispose();
     _commandSubscription?.cancel();
     _navigationSubscription?.cancel();
@@ -509,12 +525,18 @@ class _HomePageState extends State<HomePage> {
                 _isConnected ? _disconnect() : _scanAndConnect();
               } else if (value == "forget") {
                 _forgetDevice();
+              } else if (value == "destination") {
+                _showDestinationSelector();
               }
             },
             itemBuilder: (context) => [
               PopupMenuItem(
                 value: "connect", 
                 child: Text(_isConnected ? "Disconnect" : "Connect Device")
+              ),
+              const PopupMenuItem(
+                value: "destination",
+                child: Text("Select Destination (Indoor)")
               ),
               const PopupMenuItem(value: "settings", child: Text("Settings")),
               const PopupMenuItem(value: "forget", child: Text("Forget Device")),
@@ -744,5 +766,34 @@ class _HomePageState extends State<HomePage> {
       case 'stop': return Icons.stop_circle;
       default: return Icons.navigation;
     }
+  }
+
+  void _showDestinationSelector() {
+    final destinations = _beaconService.availableRooms;
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text("Select Destination", style: TextStyle(color: Colors.white)),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: destinations.length,
+              itemBuilder: (context, index) {
+                return ListTile(
+                  title: Text(destinations[index], style: const TextStyle(color: Colors.white)),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _startNavigation(destinations[index]);
+                  },
+                );
+              },
+            ),
+          ),
+        );
+      }
+    );
   }
 }
