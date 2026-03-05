@@ -115,6 +115,11 @@ class BeaconNavigationService {
         if (detectedRoom != null && _currentRoom != detectedRoom) {
           _currentRoom = detectedRoom;
           print("Current room detected: $_currentRoom (RSSI: ${strongestBeacon.rssi})");
+          
+          // If we are actively navigating, notify the navigation engine that we moved
+          if (_isNavigating && _currentPath.isNotEmpty) {
+            _evaluateNavigationStep();
+          }
         }
       }
     });
@@ -155,105 +160,152 @@ class BeaconNavigationService {
     return []; // No path
   }
 
-  Stream<Map<String, dynamic>> startNavigation(String destination) async* {
-    _isNavigating = true;
-    
-    // Attempt to match destination string to room nodes
-    String? targetNode;
-    String destLower = destination.toLowerCase();
-    
-    final rooms = _mapData['rooms'] as Map<String, dynamic>;
-    for (String node in rooms.keys) {
-        if (destLower.contains(node.toLowerCase()) || 
-           (node.toLowerCase() == "room1" && destLower.contains("room 1"))) {
-            targetNode = node;
-            break;
-        }
-    }
+  // State specific for live navigation
+  List<String> _currentPath = [];
+  int _currentStepIndex = 0;
+  String? _targetDestination;
 
-    if (targetNode == null) {
-      yield {
-        "action": "ERROR",
-        "description": "Destination $destination not found in indoor map.",
+  void _evaluateNavigationStep() {
+    if (!_isNavigating || _currentPath.isEmpty) return;
+
+    // Check if we arrived at destination
+    if (_currentRoom == _targetDestination) {
+      _navigationStreamController.add({
+        "action": "ARRIVED",
+        "description": "You have reached $_targetDestination.",
         "direction": "stop"
-      };
+      });
       _isNavigating = false;
       return;
     }
 
+    // Check if we advanced to the next room in the path
+    if (_currentStepIndex + 1 < _currentPath.length && _currentRoom == _currentPath[_currentStepIndex + 1]) {
+      // User successfully reached the next node
+      _currentStepIndex++;
+      _issueInstructionsForCurrentStep();
+    } 
+    // If the user goes completely off path (e.g. they are in a room not adjacent to their step)
+    else if (_currentRoom != _currentPath[_currentStepIndex]) {
+       // Recalculate path dynamically
+       print("Off path detected. Recalculating from $_currentRoom to $_targetDestination");
+       _navigationStreamController.add({
+         "action": "RECALCULATING",
+         "description": "Off path. Recalculating route.",
+         "direction": "stop"
+       });
+       
+       List<String> newPath = _findShortestPath(_currentRoom!, _targetDestination!);
+       if (newPath.isNotEmpty) {
+          _currentPath = newPath;
+          _currentStepIndex = 0;
+          _issueInstructionsForCurrentStep();
+       } else {
+          _navigationStreamController.add({
+             "action": "ERROR",
+             "description": "Path lost.",
+             "direction": "stop"
+          });
+          _isNavigating = false;
+       }
+    }
+  }
+
+  void _issueInstructionsForCurrentStep() {
+    if (_currentStepIndex >= _currentPath.length - 1) return;
+
+    String current = _currentPath[_currentStepIndex];
+    String next = _currentPath[_currentStepIndex + 1];
+    
+    final rooms = _mapData['rooms'] as Map<String, dynamic>;
+    var currentData = rooms[current] as Map<String, dynamic>;
+    var neighborData = currentData['neighbors'][next] as Map<String, dynamic>;
+    
+    String instruction = neighborData['direction'];
+    
+    // Main instruction
+    _navigationStreamController.add({
+        "action": "PROCEED",
+        "description": instruction,
+        "direction": instruction.toLowerCase().contains("turn") ? (instruction.toLowerCase().contains("left") ? "left" : "right") : "up"
+    });
+
+    // Features in current room (In a purely reactive BLE model, we issue features as soon as we enter the room,
+    // or we could track intermediate BLE distance, but simple room-entry yields are most reliable without dead-reckoning).
+    if (currentData.containsKey('features')) {
+        var features = currentData['features'] as Map<String, dynamic>;
+        for (var feature in features.entries) {
+            String featureName = feature.key; 
+            _navigationStreamController.add({
+                "action": "FEATURE",
+                "description": featureName == 'door' ? "Door ahead" : "Turn now",
+                "direction": "up"
+            });
+        }
+    }
+  }
+
+  Stream<Map<String, dynamic>> startNavigation(String destination) {
     if (_currentRoom == null) {
-      // If we don't have a room yet, default to Entrance for the demo to work
+      // Assume Entrance if BLE hasn't picked anything up yet just so it doesn't immediately crash,
+      // though ideally the user should wait for an initial scan.
       _currentRoom = "Entrance";
     }
 
-    List<String> path = _findShortestPath(_currentRoom!, targetNode);
-    if (path.isEmpty) {
-        yield {
-            "action": "ERROR",
-            "description": "No path found from $_currentRoom to $targetNode.",
-            "direction": "stop"
-        };
-        _isNavigating = false;
-        return;
-    }
-
-    print("Calculated Path: $path");
-
-    // Walk the path
-    for (int i = 0; i < path.length - 1; i++) {
-        if (!_isNavigating) break;
-        
-        String from = path[i];
-        String to = path[i+1];
-        
-        var fromData = rooms[from] as Map<String, dynamic>;
-        var toNodeData = fromData['neighbors'][to] as Map<String, dynamic>;
-        
-        String instruction = toNodeData['direction'];
-        int distance = toNodeData['distance'];
-        
-        // Yield the main instruction
-        yield {
-            "action": "PROCEED",
-            "description": instruction,
-            "direction": instruction.toLowerCase().contains("turn") ? (instruction.toLowerCase().contains("left") ? "left" : "right") : "up"
-        };
-        
-        // Yield feature warnings if applicable in the `from` room while moving to `to` room
-        if (fromData.containsKey('features')) {
-            var features = fromData['features'] as Map<String, dynamic>;
-            for (var feature in features.entries) {
-                String featureName = feature.key; // e.g., 'door' or 'turn'
-                
-                // We'll simulate walking time to the feature. For the app, we can just yield it halfway.
-                // In a robust app, we'd trigger this based on location/RSSI continuous tracking.
-                await Future.delayed(const Duration(seconds: 3));
-                if (!_isNavigating) break;
-                
-                yield {
-                    "action": "FEATURE",
-                    "description": featureName == 'door' ? "Door ahead" : "Turn now",
-                    "direction": "up" // Keep current direction arrow
-                };
-            }
+    _isNavigating = true;
+    _targetDestination = null;
+    
+    // Attempt to match destination string to room nodes
+    String destLower = destination.toLowerCase();
+    final rooms = _mapData['rooms'] as Map<String, dynamic>;
+    
+    for (String node in rooms.keys) {
+        if (destLower.contains(node.toLowerCase()) || 
+           (node.toLowerCase() == "room1" && destLower.contains("room 1"))) {
+            _targetDestination = node;
+            break;
         }
-        
-        // Wait for user to 'reach' next room. In demo, simulate duration based on distance (1m = 1s)
-        await Future.delayed(Duration(seconds: distance)); 
-        _currentRoom = to; // Simulate arriving
     }
 
-    if (_isNavigating) {
-        yield {
-            "action": "ARRIVED",
-            "description": "You have reached $targetNode.",
-            "direction": "stop"
-        };
-        _isNavigating = false;
+    if (_targetDestination == null) {
+      Future.microtask(() {
+        _navigationStreamController.add({
+          "action": "ERROR",
+          "description": "Destination $destination not found in map.",
+          "direction": "stop"
+        });
+      });
+      _isNavigating = false;
+      return _navigationStreamController.stream;
     }
+
+    _currentPath = _findShortestPath(_currentRoom!, _targetDestination!);
+    
+    if (_currentPath.isEmpty) {
+        Future.microtask(() {
+          _navigationStreamController.add({
+              "action": "ERROR",
+              "description": "No path found from $_currentRoom to $_targetDestination.",
+              "direction": "stop"
+          });
+        });
+        _isNavigating = false;
+        return _navigationStreamController.stream;
+    }
+
+    print("Calculated Live Path: $_currentPath");
+    _currentStepIndex = 0;
+    
+    // Issue the very first step immediately
+    Future.microtask(() {
+       _issueInstructionsForCurrentStep();
+    });
+
+    return _navigationStreamController.stream;
   }
 
   void stopNavigation() {
     _isNavigating = false;
+    _currentPath.clear();
   }
 }
