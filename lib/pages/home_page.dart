@@ -378,11 +378,25 @@ class _HomePageState extends State<HomePage> {
       _speak("Calling caretaker");
     } else if (command.contains("repeat") || command.contains("say again")) {
       _speak(_currentDescription);
+    } else if (command.contains("room 1") || command.contains("room1")) {
+      // Natural language detect for Room 1
+      _startNavigation("Room1");
+    } else if (command.contains("hallway")) {
+      // Natural language detect for Hallway
+      _startNavigation("Hallway");
+    } else if (command.contains("entrance")) {
+      // Natural language detect for Entrance
+      _startNavigation("Entrance");
     } else if (command.contains("go to") || command.contains("navigate to") || command.contains("take me to")) {
+      // Fallback for older block commands to not break existing flow
       String destination = command.replaceAll("go to", "").replaceAll("navigate to", "").replaceAll("take me to", "").trim();
-      _startNavigation(destination);
+      if (destination.isNotEmpty) {
+        _startNavigation(destination);
+      } else {
+        _speak("Sorry, I didn't understand. Please say Go to Room1, Hallway or Entrance");
+      }
     } else {
-      _speak("I didn't catch that. Please tap and try again.");
+      _speak("Sorry, I didn't understand. Please say Go to Room1, Hallway or Entrance");
     }
   }
 
