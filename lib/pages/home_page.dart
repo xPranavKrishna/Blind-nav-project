@@ -643,11 +643,17 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildNavigationUI() {
     return InkWell(
-      onTap: () {
+      onTap: () async {
          // Allow tapping during navigation to issue commands like "Stop"
+         print("Tap detected on Navigation UI");
+         await _ttsService.stop(); // Immediately pause navigation speech so user can talk
+         
          if (!_speechService.isListening) {
-          _speechService.startListening();
-        }
+           print("Starting listening from tap during navigation...");
+           _speechService.resumeListening();
+         } else {
+           print("Already listening");
+         }
       },
       child: Column(
         children: [

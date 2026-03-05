@@ -72,6 +72,9 @@ class BeaconNavigationService {
             : result.advertisementData.advName;
             
         if (name == "Room1-Beacon" || name == "Hallway-Beacon") {
+          // Log every beacon hit for user debugging
+          print("Detected: $name (RSSI: ${result.rssi})");
+          
           if (result.rssi > -70) {
             if (strongestBeacon == null || result.rssi > strongestBeacon.rssi) {
               strongestBeacon = result;
@@ -85,28 +88,20 @@ class BeaconNavigationService {
             ? strongestBeacon.device.platformName 
             : strongestBeacon.advertisementData.advName;
             
-        // Map beacon name to room roughly (Hallway-Beacon spans Entrance/Hallway, Room1-Beacon spans Room1)
-        // In reality, this logic needs to be sophisticated, but we'll use a direct mapping based on map data.
         String? detectedRoom;
         
-        // Find which room this beacon belongs to in the map
         final rooms = _mapData['rooms'] as Map<String, dynamic>;
         for (var entry in rooms.entries) {
            final roomData = entry.value as Map<String, dynamic>;
            final beacons = (roomData['beacons'] as List).cast<String>();
            if (beacons.contains(strongName)) {
-               detectedRoom = entry.key; // Example: if it's Room1-Beacon -> Room1
-               // If Hallway-Beacon, it could be Entrance or Hallway. We'll default to the first match if no current tracking.
-               // For a robust system, we would refine this.
-               // For now, Entrance/Hallway distinction could simply be Entrance if we haven't entered yet, else Hallway.
+               detectedRoom = entry.key; 
            }
         }
         
-        // Specific disambiguation for Hallway vs Entrance since they share a beacon in the example
         if (strongName == "Hallway-Beacon") {
-            // Keep current room if it's already Hallway or Entrance to prevent bouncing
             if (_currentRoom != "Hallway" && _currentRoom != "Entrance") {
-                detectedRoom = "Entrance"; // Default entry point
+                detectedRoom = "Entrance"; 
             } else {
                 detectedRoom = _currentRoom; 
             }
@@ -114,7 +109,7 @@ class BeaconNavigationService {
 
         if (detectedRoom != null && _currentRoom != detectedRoom) {
           _currentRoom = detectedRoom;
-          print("Current room detected: $_currentRoom (RSSI: ${strongestBeacon.rssi})");
+          print(">>> Transitioned to room: $_currentRoom (Beacon: $strongName, RSSI: ${strongestBeacon!.rssi})");
           
           // If we are actively navigating, notify the navigation engine that we moved
           if (_isNavigating && _currentPath.isNotEmpty) {
