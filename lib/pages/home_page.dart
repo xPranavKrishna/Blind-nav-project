@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'connection_page.dart';
+import 'package:flutter/services.dart';
 import '../services/speech_service.dart';
 import '../services/tts_service.dart';
 import '../services/navigation_demo_service.dart';
@@ -107,28 +108,40 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _requestPermissions() async {
-    // Basic permissions
-    await [
+    // Request all required permissions aggressively at launch
+    Map<Permission, PermissionStatus> statuses = await [
       Permission.microphone,
       Permission.phone,
       Permission.location,
+      if (Platform.isAndroid) ...[
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+      ]
     ].request();
+
+    bool anyDenied = statuses.values.any((status) => status.isDenied || status.isPermanentlyDenied);
+
+    if (anyDenied) {
+      ConsoleService().log("Some permissions were denied. App may not function perfectly.");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Please grant all permissions for Voice and Bluetooth to work properly.'),
+            action: SnackBarAction(
+              label: 'Settings',
+              onPressed: () => openAppSettings(),
+            ),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _checkPermissionsAndAutoConnect() async {
-    if (Platform.isAndroid) {
-      Map<Permission, PermissionStatus> statuses = await [
-        Permission.bluetoothScan,
-        Permission.bluetoothConnect,
-        Permission.location,
-      ].request();
-      
-      if (statuses.values.any((status) => status.isDenied || status.isPermanentlyDenied)) {
-         ConsoleService().log("Bluetooth permissions denied");
-         // Don't block app, just show status
-      }
-    }
-
+    // Permissions are now fully handled in _requestPermissions().
+    // We just proceed to try auto-connecting.
+    
     // Auto-reconnect
     final prefs = await SharedPreferences.getInstance();
     final String? bondedDeviceId = prefs.getString(PREF_BONDED_DEVICE_ID);
@@ -750,7 +763,22 @@ class _HomePageState extends State<HomePage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text("Debug Console", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text("Debug Console", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                      IconButton(
+                        icon: const Icon(Icons.copy, color: Colors.blueAccent),
+                        onPressed: () {
+                          final allLogs = logs.join('\n');
+                          Clipboard.setData(ClipboardData(text: allLogs));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Logs copied to clipboard'), duration: Duration(seconds: 1)),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
                   const Divider(color: Colors.grey),
                   Expanded(
                     child: ListView.builder(
@@ -758,7 +786,8 @@ class _HomePageState extends State<HomePage> {
                       itemBuilder: (context, index) {
                         return Padding(
                           padding: const EdgeInsets.symmetric(vertical: 2),
-                          child: Text(logs[index], style: const TextStyle(color: Colors.greenAccent, fontSize: 12, fontFamily: 'Courier')),
+                          // Adding SelectableText so users can manually select parts of the log
+                          child: SelectableText(logs[index], style: const TextStyle(color: Colors.greenAccent, fontSize: 12, fontFamily: 'Courier')),
                         );
                       },
                     ),
