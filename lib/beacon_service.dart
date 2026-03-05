@@ -5,7 +5,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:vazhikaatti/services/console_service.dart';
 
 class BeaconNavigationService {
-  // Hardcoded room map from user's JSON requirements
+  // Map (same as before)
   final Map<String, dynamic> _mapData = {
     "rooms": {
       "Entrance": {
@@ -42,88 +42,80 @@ class BeaconNavigationService {
   bool _isNavigating = false;
   StreamSubscription<List<ScanResult>>? _scanSubscription;
 
-  // Stream controller to notify the UI of navigation steps
-  final StreamController<Map<String, dynamic>> _navigationStreamController = StreamController<Map<String, dynamic>>.broadcast();
+  final StreamController<Map<String, dynamic>> _navigationStreamController =
+      StreamController<Map<String, dynamic>>.broadcast();
 
   String? get currentRoom => _currentRoom;
   bool get isNavigating => _isNavigating;
   List<String> get availableRooms => _mapData['rooms'].keys.toList().cast<String>();
 
+  // Live navigation state
+  List<String> _currentPath = [];
+  int _currentStepIndex = 0;
+  String? _targetDestination;
+
   void startScanning() {
-    print("BeaconNavigationService: Starting background BLE scanning...");
-    // Every 5 seconds, scan for exactly 2 seconds
-    _scanTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-      // Do not interrupt existing connections, just run a background scan
+    print("BeaconNavigationService: Starting real-time BLE scanning...");
+
+    _scanTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
       try {
-        await FlutterBluePlus.startScan(
-          timeout: const Duration(seconds: 2),
-          // We don't filter by UUID here because we are looking for generic beacons
-          // with specific names. Filtering by withNames is possible but keeping it broad
-          // ensures we catch them if advertising formats differ.
-        );
+        await FlutterBluePlus.startScan(timeout: const Duration(seconds: 2));
       } catch (e) {
-        print("Beacon Scan error: $e");
+        print("Scan error: $e");
       }
     });
 
-
     _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
-      ScanResult? strongestBeacon;
-      for (var result in results) {
-        final name = result.device.platformName.isNotEmpty 
-            ? result.device.platformName 
-            : result.advertisementData.advName;
-            
+      ScanResult? strongest;
+      int beaconCount = 0;
+
+      for (var r in results) {
+        final name = r.device.platformName.isNotEmpty
+            ? r.device.platformName
+            : r.advertisementData.advName;
+
         if (name == "Room1-Beacon" || name == "Hallway-Beacon") {
-          
-          if (result.rssi > -95) { // More forgiving threshold
-            if (strongestBeacon == null || result.rssi > strongestBeacon.rssi) {
-              strongestBeacon = result;
-            }
+          beaconCount++;
+          if (r.rssi > -95 && (strongest == null || r.rssi > strongest.rssi)) {
+            strongest = r;
           }
         }
       }
 
-      if (strongestBeacon != null) {
-        final strongName = strongestBeacon.device.platformName.isNotEmpty 
-            ? strongestBeacon.device.platformName 
-            : strongestBeacon.advertisementData.advName;
-            
-        // Calculate rough distance in meters: d = 10 ^ ((MeasuredPower - RSSI) / (10 * N))
-        // Assuming MeasuredPower at 1m is -69 dBm, and environmental factor N is 2.0
-        double distance = pow(10, (-69 - strongestBeacon.rssi) / (10 * 2.0)).toDouble();
-        String distanceStr = distance.toStringAsFixed(2);
-            
-        // Log to the ConsoleService so user can copy it from the app UI
-        ConsoleService().log("[BLE] Nearest: $strongName | RSSI: ${strongestBeacon.rssi} | Dist: ${distanceStr}m");
+      if (strongest != null) {
+        final name = strongest.device.platformName.isNotEmpty
+            ? strongest.device.platformName
+            : strongest.advertisementData.advName;
 
+        // Distance estimation
+        double distance = pow(10, (-69 - strongest.rssi) / 20.0).toDouble();
+
+        ConsoleService().log(
+            "[BLE] Nearest: $name | RSSI: ${strongest.rssi} | Dist: ${distance.toStringAsFixed(1)}m | Beacons seen: $beaconCount");
+
+        // Determine room
         String? detectedRoom;
-        
         final rooms = _mapData['rooms'] as Map<String, dynamic>;
         for (var entry in rooms.entries) {
-           final roomData = entry.value as Map<String, dynamic>;
-           final beacons = (roomData['beacons'] as List).cast<String>();
-           if (beacons.contains(strongName)) {
-               detectedRoom = entry.key; 
-           }
-        }
-        
-        if (strongName == "Hallway-Beacon") {
-            if (_currentRoom != "Hallway" && _currentRoom != "Entrance") {
-                detectedRoom = "Entrance"; 
-            } else {
-                detectedRoom = _currentRoom; 
-            }
+          if ((entry.value['beacons'] as List).contains(name)) {
+            detectedRoom = entry.key;
+            break;
+          }
         }
 
-        // Only transition if RSSI is strong enough to definitively say we are in the room (-85 is a safe bet for proximity)
-        if (detectedRoom != null && _currentRoom != detectedRoom && strongestBeacon.rssi > -85) {
+        // Hallway-Beacon disambiguation (simple but stable)
+        if (name == "Hallway-Beacon") {
+          detectedRoom = (_currentRoom == "Room1") ? "Hallway" : "Entrance";
+        }
+
+        // Update room only if strong signal and different
+        if (detectedRoom != null &&
+            _currentRoom != detectedRoom &&
+            strongest.rssi > -85) {
           _currentRoom = detectedRoom;
           ConsoleService().log("[BLE] >>> ENTERED ROOM: $_currentRoom");
-          
-          if (_isNavigating && _currentPath.isNotEmpty) {
-            _evaluateNavigationStep();
-          }
+
+          if (_isNavigating) _evaluateNavigationStep();
         }
       }
     });
@@ -134,10 +126,8 @@ class BeaconNavigationService {
     _scanSubscription?.cancel();
   }
 
-  // Uses BFS to find the shortest path of rooms
   List<String> _findShortestPath(String start, String target) {
     if (start == target) return [start];
-
     final rooms = _mapData['rooms'] as Map<String, dynamic>;
     Queue<List<String>> queue = Queue();
     Set<String> visited = {};
@@ -148,31 +138,22 @@ class BeaconNavigationService {
     while (queue.isNotEmpty) {
       List<String> path = queue.removeFirst();
       String current = path.last;
-
-      if (current == target) {
-        return path;
-      }
+      if (current == target) return path;
 
       final neighbors = (rooms[current]['neighbors'] as Map<String, dynamic>).keys;
-      for (String neighbor in neighbors) {
-        if (!visited.contains(neighbor)) {
-          visited.add(neighbor);
-          queue.add(List.from(path)..add(neighbor));
+      for (String n in neighbors) {
+        if (!visited.contains(n)) {
+          visited.add(n);
+          queue.add(List.from(path)..add(n));
         }
       }
     }
-    return []; // No path
+    return [];
   }
-
-  // State specific for live navigation
-  List<String> _currentPath = [];
-  int _currentStepIndex = 0;
-  String? _targetDestination;
 
   void _evaluateNavigationStep() {
     if (!_isNavigating || _currentPath.isEmpty) return;
 
-    // Check if we arrived at destination
     if (_currentRoom == _targetDestination) {
       _navigationStreamController.add({
         "action": "ARRIVED",
@@ -183,35 +164,22 @@ class BeaconNavigationService {
       return;
     }
 
-    // Check if we advanced to the next room in the path
-    if (_currentStepIndex + 1 < _currentPath.length && _currentRoom == _currentPath[_currentStepIndex + 1]) {
-      // User successfully reached the next node
+    // Advance step only when we enter the expected next room
+    if (_currentStepIndex + 1 < _currentPath.length &&
+        _currentRoom == _currentPath[_currentStepIndex + 1]) {
       _currentStepIndex++;
       _issueInstructionsForCurrentStep();
     } 
-    // If the user goes completely off path (e.g. they are in a room not adjacent to their step)
-    else if (_currentRoom != _currentPath[_currentStepIndex]) {
-       // Recalculate path dynamically
-       print("Off path detected. Recalculating from $_currentRoom to $_targetDestination");
-       _navigationStreamController.add({
-         "action": "RECALCULATING",
-         "description": "Off path. Recalculating route.",
-         "direction": "stop"
-       });
-       
-       List<String> newPath = _findShortestPath(_currentRoom!, _targetDestination!);
-       if (newPath.isNotEmpty) {
-          _currentPath = newPath;
-          _currentStepIndex = 0;
-          _issueInstructionsForCurrentStep();
-       } else {
-          _navigationStreamController.add({
-             "action": "ERROR",
-             "description": "Path lost.",
-             "direction": "stop"
-          });
-          _isNavigating = false;
-       }
+    // Off-path → recalculate
+    else if (!_currentPath.contains(_currentRoom!)) {
+      _navigationStreamController.add({
+        "action": "RECALCULATING",
+        "description": "Off path. Recalculating...",
+        "direction": "stop"
+      });
+      _currentPath = _findShortestPath(_currentRoom!, _targetDestination!);
+      _currentStepIndex = 0;
+      if (_currentPath.isNotEmpty) _issueInstructionsForCurrentStep();
     }
   }
 
@@ -220,90 +188,61 @@ class BeaconNavigationService {
 
     String current = _currentPath[_currentStepIndex];
     String next = _currentPath[_currentStepIndex + 1];
-    
+
     final rooms = _mapData['rooms'] as Map<String, dynamic>;
-    var currentData = rooms[current] as Map<String, dynamic>;
-    var neighborData = currentData['neighbors'][next] as Map<String, dynamic>;
-    
-    String instruction = neighborData['direction'];
-    
-    // Main instruction
+    var neighborData = (rooms[current]['neighbors'] as Map<String, dynamic>)[next];
+
     _navigationStreamController.add({
-        "action": "PROCEED",
-        "description": instruction,
-        "direction": instruction.toLowerCase().contains("turn") ? (instruction.toLowerCase().contains("left") ? "left" : "right") : "up"
+      "action": "PROCEED",
+      "description": neighborData['direction'],
+      "direction": neighborData['direction'].toLowerCase().contains("turn")
+          ? "left"
+          : "up"
     });
 
-    // Features in current room (In a purely reactive BLE model, we issue features as soon as we enter the room,
-    // or we could track intermediate BLE distance, but simple room-entry yields are most reliable without dead-reckoning).
-    if (currentData.containsKey('features')) {
-        var features = currentData['features'] as Map<String, dynamic>;
-        for (var feature in features.entries) {
-            String featureName = feature.key; 
-            _navigationStreamController.add({
-                "action": "FEATURE",
-                "description": featureName == 'door' ? "Door ahead" : "Turn now",
-                "direction": "up"
-            });
-        }
+    // Feature check
+    var features = rooms[current]['features'] as Map<String, dynamic>?;
+    if (features != null) {
+      for (var f in features.keys) {
+        _navigationStreamController.add({
+          "action": "FEATURE",
+          "description": f == 'door' ? "Door ahead" : "Turn now",
+          "direction": "up"
+        });
+      }
     }
   }
 
   Stream<Map<String, dynamic>> startNavigation(String destination) {
-    if (_currentRoom == null) {
-      // Assume Entrance if BLE hasn't picked anything up yet just so it doesn't immediately crash,
-      // though ideally the user should wait for an initial scan.
-      _currentRoom = "Entrance";
-    }
-
     _isNavigating = true;
     _targetDestination = null;
-    
-    // Attempt to match destination string to room nodes
+
     String destLower = destination.toLowerCase();
     final rooms = _mapData['rooms'] as Map<String, dynamic>;
-    
     for (String node in rooms.keys) {
-        if (destLower.contains(node.toLowerCase()) || 
-           (node.toLowerCase() == "room1" && destLower.contains("room 1"))) {
-            _targetDestination = node;
-            break;
-        }
+      if (destLower.contains(node.toLowerCase()) ||
+          (node.toLowerCase() == "room1" && destLower.contains("room 1"))) {
+        _targetDestination = node;
+        break;
+      }
     }
 
-    if (_targetDestination == null) {
-      Future.microtask(() {
-        _navigationStreamController.add({
-          "action": "ERROR",
-          "description": "Destination $destination not found in map.",
-          "direction": "stop"
-        });
+    if (_targetDestination == null || _currentRoom == null) {
+      _navigationStreamController.add({
+        "action": "ERROR",
+        "description": "Cannot start navigation yet. Wait for room detection.",
+        "direction": "stop"
       });
       _isNavigating = false;
       return _navigationStreamController.stream;
     }
 
     _currentPath = _findShortestPath(_currentRoom!, _targetDestination!);
-    
-    if (_currentPath.isEmpty) {
-        Future.microtask(() {
-          _navigationStreamController.add({
-              "action": "ERROR",
-              "description": "No path found from $_currentRoom to $_targetDestination.",
-              "direction": "stop"
-          });
-        });
-        _isNavigating = false;
-        return _navigationStreamController.stream;
-    }
-
-    print("Calculated Live Path: $_currentPath");
     _currentStepIndex = 0;
-    
-    // Issue the very first step immediately
-    Future.microtask(() {
-       _issueInstructionsForCurrentStep();
-    });
+
+    if (_currentPath.isNotEmpty) {
+      _issueInstructionsForCurrentStep();
+    }
 
     return _navigationStreamController.stream;
   }
