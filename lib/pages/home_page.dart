@@ -254,21 +254,29 @@ class _HomePageState extends State<HomePage> {
       try {
         targetService = services.firstWhere((s) => s.uuid.toString() == SERVICE_UUID);
       } catch (e) {
-        ConsoleService().log("Service not found");
+        ConsoleService().log("Service $SERVICE_UUID not found");
         return;
       }
 
+      // Cancel old subscriptions if any
+      _distanceSubscription?.cancel();
+      _detectedSubscription?.cancel();
+
       for (BluetoothCharacteristic c in targetService.characteristics) {
         if (c.uuid.toString() == DISTANCE_UUID) {
-          await c.setNotifyValue(true);
-          _distanceSubscription = c.onValueReceived.listen((value) {
-            _processDistance(value);
-          });
+          if (c.properties.notify || c.properties.indicate) {
+             await c.setNotifyValue(true);
+             _distanceSubscription = c.onValueReceived.listen((value) {
+               _processDistance(value);
+             });
+          }
         } else if (c.uuid.toString() == DETECTED_UUID) {
-          await c.setNotifyValue(true);
-          _detectedSubscription = c.onValueReceived.listen((value) {
-            _processDetected(value);
-          });
+          if (c.properties.notify || c.properties.indicate) {
+             await c.setNotifyValue(true);
+             _detectedSubscription = c.onValueReceived.listen((value) {
+               _processDetected(value);
+             });
+          }
         }
       }
     } catch (e) {
