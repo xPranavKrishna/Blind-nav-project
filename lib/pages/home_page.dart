@@ -163,11 +163,13 @@ class _HomePageState extends State<HomePage> {
         List<BluetoothDevice> bondedDevices = await FlutterBluePlus.bondedDevices;
         try {
           BluetoothDevice device = bondedDevices.firstWhere((d) => d.remoteId.str == deviceId);
-          await _connectToDevice(device, isAutoConnect: true);
+          // Use isAutoConnect: false. This forces it to block and time out normally,
+          // instead of returning immediately and spamming the loop.
+          await _connectToDevice(device, isAutoConnect: false);
         } catch (e) {
            // Fallback
            BluetoothDevice device = BluetoothDevice.fromId(deviceId);
-           await _connectToDevice(device, isAutoConnect: true);
+           await _connectToDevice(device, isAutoConnect: false);
         }
       } catch (e) {
         ConsoleService().log("Reconnection loop error: $e");
@@ -177,6 +179,9 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _connectToDevice(BluetoothDevice device, {bool isAutoConnect = false}) async {
     if (_isConnecting) return;
+    
+    // Cancel any existing subscription to prevent memory leaks and duplicate states
+    _connectionStateSubscription?.cancel();
 
     setState(() {
       _connectionStatus = "Connecting...";
