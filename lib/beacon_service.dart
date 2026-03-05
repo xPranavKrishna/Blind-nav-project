@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:vazhikaatti/services/console_service.dart';
 
 class BeaconNavigationService {
   // Hardcoded room map from user's JSON requirements
@@ -64,6 +66,7 @@ class BeaconNavigationService {
       }
     });
 
+
     _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
       ScanResult? strongestBeacon;
       for (var result in results) {
@@ -72,10 +75,8 @@ class BeaconNavigationService {
             : result.advertisementData.advName;
             
         if (name == "Room1-Beacon" || name == "Hallway-Beacon") {
-          // Log every beacon hit for user debugging
-          print("Detected: $name (RSSI: ${result.rssi})");
           
-          if (result.rssi > -70) {
+          if (result.rssi > -95) { // More forgiving threshold
             if (strongestBeacon == null || result.rssi > strongestBeacon.rssi) {
               strongestBeacon = result;
             }
@@ -88,6 +89,14 @@ class BeaconNavigationService {
             ? strongestBeacon.device.platformName 
             : strongestBeacon.advertisementData.advName;
             
+        // Calculate rough distance in meters: d = 10 ^ ((MeasuredPower - RSSI) / (10 * N))
+        // Assuming MeasuredPower at 1m is -69 dBm, and environmental factor N is 2.0
+        double distance = pow(10, (-69 - strongestBeacon.rssi) / (10 * 2.0)).toDouble();
+        String distanceStr = distance.toStringAsFixed(2);
+            
+        // Log to the ConsoleService so user can copy it from the app UI
+        ConsoleService().log("[BLE] Nearest: $strongName | RSSI: ${strongestBeacon.rssi} | Dist: ${distanceStr}m");
+
         String? detectedRoom;
         
         final rooms = _mapData['rooms'] as Map<String, dynamic>;
@@ -107,11 +116,11 @@ class BeaconNavigationService {
             }
         }
 
-        if (detectedRoom != null && _currentRoom != detectedRoom) {
+        // Only transition if RSSI is strong enough to definitively say we are in the room (-85 is a safe bet for proximity)
+        if (detectedRoom != null && _currentRoom != detectedRoom && strongestBeacon.rssi > -85) {
           _currentRoom = detectedRoom;
-          print(">>> Transitioned to room: $_currentRoom (Beacon: $strongName, RSSI: ${strongestBeacon!.rssi})");
+          ConsoleService().log("[BLE] >>> ENTERED ROOM: $_currentRoom");
           
-          // If we are actively navigating, notify the navigation engine that we moved
           if (_isNavigating && _currentPath.isNotEmpty) {
             _evaluateNavigationStep();
           }
