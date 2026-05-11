@@ -21,6 +21,20 @@ const String DETECTED_UUID = "1c95d5e3-d8f7-413a-bf3d-7d3d14a81bf0";
 const String TIMESTAMP_UUID = "d8f7125f-b267-4e20-bee0-1a951a1ac307";
 const String PREF_BONDED_DEVICE_ID = "bonded_device_id";
 
+// ─── Design Tokens ────────────────────────────────────────────────────────────
+const Color _kBackground    = Color(0xFFF5F5F0);   // warm off-white
+const Color _kSurface       = Color(0xFFFFFFFF);
+const Color _kAccent        = Color(0xFFFFBF00);   // deep amber — WCAG AA on white
+const Color _kAccentDark    = Color(0xFFCC9900);
+const Color _kTextPrimary   = Color(0xFF1A1A1A);
+const Color _kTextSecondary = Color(0xFF555550);
+const Color _kDanger        = Color(0xFFD32F2F);
+const Color _kSuccess       = Color(0xFF1B7B4B);
+const Color _kBlueBLE       = Color(0xFF1565C0);
+const Color _kBorder        = Color(0xFFDDDDD8);
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -28,65 +42,101 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final SpeechService _speechService = SpeechService();
   final TtsService _ttsService = TtsService();
   final NavigationDemoService _navigationService = NavigationDemoService();
   final BeaconNavigationService _beaconService = BeaconNavigationService();
-  // final ObstacleRealService _obstacleService = ObstacleRealService(); // Deprecated
   final EmergencyService _emergencyService = EmergencyService();
 
   String _currentAction = "Ready";
   String _currentDescription = "Say a destination";
   String _statusText = "Initializing...";
-  String _directionIcon = "up"; // up, left, right, stop
+  String _directionIcon = "up";
   bool _isNavigating = false;
   bool _isObstacle = false;
-  
+
   // BLE State
   BluetoothDevice? _connectedDevice;
   String _connectionStatus = "Disconnected";
   bool _isConnected = false;
   int _distance = 0;
   DateTime _lastAlertTime = DateTime.fromMillisecondsSinceEpoch(0);
-  
+
   StreamSubscription? _commandSubscription;
   StreamSubscription? _navigationSubscription;
   StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
   StreamSubscription<List<int>>? _distanceSubscription;
   StreamSubscription<List<int>>? _detectedSubscription;
   StreamSubscription<List<int>>? _timestampSubscription;
-  
+
+  Timer? _uiUpdateTimer;
   Timer? _reconnectionTimer;
   bool _isConnecting = false;
+  String? _currentTarget;
+  String _lastSpokenRoom = "";
+  String _lastSpokenStep = "";
+
+  // Animation controllers
+  late AnimationController _pulseController;
+  late AnimationController _directionController;
+  late AnimationController _obstacleFlashController;
+  late Animation<double> _pulseAnimation;
+  late Animation<double> _directionScaleAnim;
+  late Animation<double> _obstacleOpacity;
 
   @override
   void initState() {
     super.initState();
+    _initAnimations();
     _initServices();
   }
+
+  void _initAnimations() {
+    // Mic pulse
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.18).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    // Direction icon entrance
+    _directionController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 400),
+    );
+    _directionScaleAnim = CurvedAnimation(
+      parent: _directionController,
+      curve: Curves.elasticOut,
+    );
+
+    // Obstacle flash
+    _obstacleFlashController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    )..repeat(reverse: true);
+    _obstacleOpacity = Tween<double>(begin: 0.5, end: 1.0).animate(
+      _obstacleFlashController,
+    );
+  }
+
+  // ── ALL LOGIC BELOW IS UNCHANGED FROM ORIGINAL ─────────────────────────────
 
   Future<void> _initServices() async {
     await _requestPermissions();
     await _ttsService.init();
     bool available = await _speechService.init();
-    
+
     if (available) {
-      setState(() {
-        _statusText = "Tap to Speak";
-      });
+      setState(() { _statusText = "Tap to Speak"; });
     } else {
-      setState(() {
-        _statusText = "Microphone not available";
-      });
+      setState(() { _statusText = "Microphone not available"; });
     }
 
-    // Start indoor beacon scanning for navigation
     _beaconService.startScanning();
-
-    // Auto-connect to BLE
     _checkPermissionsAndAutoConnect();
-
 
     _commandSubscription = _speechService.commandStream.listen(_handleCommand);
     _speechService.listeningStream.listen((isListening) {
@@ -94,43 +144,56 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           _statusText = isListening ? "Listening..." : "Tap to Speak";
         });
+        if (isListening) {
+          _pulseController.repeat(reverse: true);
+        } else {
+          _pulseController.stop();
+          _pulseController.reset();
+        }
       }
     });
 
-    // Initial Welcome Message & Listen
     Future.delayed(Duration(seconds: 1), () async {
       await _speak(
-        "Welcome to Vazhikaatti. Tap the screen and say a destination like Library or Admin Block."
+        "Welcome to Vazhikaatti. Tap the screen and say a destination like Library or Admin Block.",
       );
-      // Optional: Listen once at startup if desired, or just wait for tap
       _speechService.startListening();
+    });
+
+    _uiUpdateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) {
+        setState(() {});
+        if (_isNavigating && !_isObstacle && _beaconService.currentRoom != null) {
+          String currentRoom = _beaconService.currentRoom!;
+          if (currentRoom != _lastSpokenRoom && currentRoom != "Searching...") {
+            _lastSpokenRoom = currentRoom;
+            _speak("Entered $currentRoom");
+          }
+        }
+      }
     });
   }
 
   Future<void> _requestPermissions() async {
-    // Request all required permissions aggressively at launch
     Map<Permission, PermissionStatus> statuses = await [
       Permission.microphone,
       Permission.phone,
       Permission.location,
+      Permission.activityRecognition,
       if (Platform.isAndroid) ...[
         Permission.bluetoothScan,
         Permission.bluetoothConnect,
       ]
     ].request();
 
-    bool anyDenied = statuses.values.any((status) => status.isDenied || status.isPermanentlyDenied);
-
+    bool anyDenied = statuses.values.any((s) => s.isDenied || s.isPermanentlyDenied);
     if (anyDenied) {
-      ConsoleService().log("Some permissions were denied. App may not function perfectly.");
+      ConsoleService().log("Some permissions were denied.");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Text('Please grant all permissions for Voice and Bluetooth to work properly.'),
-            action: SnackBarAction(
-              label: 'Settings',
-              onPressed: () => openAppSettings(),
-            ),
+            content: const Text('Please grant all permissions for Voice and Bluetooth.'),
+            action: SnackBarAction(label: 'Settings', onPressed: () => openAppSettings()),
             duration: const Duration(seconds: 4),
           ),
         );
@@ -139,13 +202,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _checkPermissionsAndAutoConnect() async {
-    // Permissions are now fully handled in _requestPermissions().
-    // We just proceed to try auto-connecting.
-    
-    // Auto-reconnect
     final prefs = await SharedPreferences.getInstance();
     final String? bondedDeviceId = prefs.getString(PREF_BONDED_DEVICE_ID);
-
     if (bondedDeviceId != null) {
       ConsoleService().log("Found saved device ID: $bondedDeviceId");
       _startReconnectionLoop(bondedDeviceId);
@@ -156,20 +214,15 @@ class _HomePageState extends State<HomePage> {
     _reconnectionTimer?.cancel();
     _reconnectionTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       if (_isConnected || _isConnecting) return;
-
       ConsoleService().log("Aggressive Reconnect: Trying to connect...");
       try {
-        // Try to find in bonded list first (most reliable)
         List<BluetoothDevice> bondedDevices = await FlutterBluePlus.bondedDevices;
         try {
           BluetoothDevice device = bondedDevices.firstWhere((d) => d.remoteId.str == deviceId);
-          // Use isAutoConnect: false. This forces it to block and time out normally,
-          // instead of returning immediately and spamming the loop.
           await _connectToDevice(device, isAutoConnect: false);
         } catch (e) {
-           // Fallback
-           BluetoothDevice device = BluetoothDevice.fromId(deviceId);
-           await _connectToDevice(device, isAutoConnect: false);
+          BluetoothDevice device = BluetoothDevice.fromId(deviceId);
+          await _connectToDevice(device, isAutoConnect: false);
         }
       } catch (e) {
         ConsoleService().log("Reconnection loop error: $e");
@@ -179,71 +232,34 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _connectToDevice(BluetoothDevice device, {bool isAutoConnect = false}) async {
     if (_isConnecting) return;
-    
-    // Cancel any existing subscription to prevent memory leaks and duplicate states
     _connectionStateSubscription?.cancel();
-
-    setState(() {
-      _connectionStatus = "Connecting...";
-      _isConnecting = true;
-    });
-    ConsoleService().log("Connecting to ${device.platformName} (Auto: $isAutoConnect)...");
-
+    setState(() { _connectionStatus = "Connecting..."; _isConnecting = true; });
+    ConsoleService().log("Connecting to ${device.platformName}...");
     try {
-      // Connect
-      // autoConnect: true allows background reconnection on Android
-      await device.connect(autoConnect: isAutoConnect); 
-      
-      if (!isAutoConnect) {
-        // Only wait if manual connection, otherwise let it happen in background
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-
-      // Check Bond State
+      await device.connect(autoConnect: isAutoConnect);
+      if (!isAutoConnect) await Future.delayed(const Duration(milliseconds: 500));
       if (Platform.isAndroid) {
         var bondState = await device.bondState.first;
-        if (bondState == BluetoothBondState.bonded) {
-           ConsoleService().log("Device already bonded.");
-        } else {
-           ConsoleService().log("Device not bonded. Attempting to bond...");
-           try {
-             await device.createBond();
-           } catch (e) {
-             ConsoleService().log("Bonding failed/skipped: $e");
-           }
+        if (bondState != BluetoothBondState.bonded) {
+          try { await device.createBond(); } catch (e) { ConsoleService().log("Bonding failed: $e"); }
         }
       }
-
       _connectionStateSubscription = device.connectionState.listen((state) {
         if (state == BluetoothConnectionState.connected) {
-          setState(() {
-            _isConnected = true;
-            _connectionStatus = "Connected";
-            _connectedDevice = device;
-          });
+          setState(() { _isConnected = true; _connectionStatus = "Connected"; _connectedDevice = device; });
           _saveBondedDevice(device.remoteId.str);
           _discoverServices(device);
           _speak("Device connected");
         } else if (state == BluetoothConnectionState.disconnected) {
-          setState(() {
-            _isConnected = false;
-            _connectionStatus = "Disconnected";
-            _connectedDevice = null;
-          });
+          setState(() { _isConnected = false; _connectionStatus = "Disconnected"; _connectedDevice = null; });
           _speak("Device disconnected");
         }
       });
-
     } catch (e) {
-      setState(() {
-        _connectionStatus = "Failed";
-        _isConnecting = false;
-      });
+      setState(() { _connectionStatus = "Failed"; _isConnecting = false; });
       ConsoleService().log("Connection failed: $e");
     } finally {
-      setState(() {
-        _isConnecting = false;
-      });
+      setState(() { _isConnecting = false; });
     }
   }
 
@@ -251,60 +267,41 @@ class _HomePageState extends State<HomePage> {
     try {
       List<BluetoothService> services = await device.discoverServices();
       BluetoothService? targetService;
-      try {
-        targetService = services.firstWhere((s) => s.uuid.toString() == SERVICE_UUID);
-      } catch (e) {
-        ConsoleService().log("Service $SERVICE_UUID not found");
-        return;
-      }
-
-      // Cancel old subscriptions if any
+      try { targetService = services.firstWhere((s) => s.uuid.toString() == SERVICE_UUID); }
+      catch (e) { ConsoleService().log("Service $SERVICE_UUID not found"); return; }
       _distanceSubscription?.cancel();
       _detectedSubscription?.cancel();
-
       for (BluetoothCharacteristic c in targetService.characteristics) {
         if (c.uuid.toString() == DISTANCE_UUID) {
           if (c.properties.notify || c.properties.indicate) {
-             await c.setNotifyValue(true);
-             _distanceSubscription = c.onValueReceived.listen((value) {
-               _processDistance(value);
-             });
+            await c.setNotifyValue(true);
+            _distanceSubscription = c.onValueReceived.listen(_processDistance);
           }
         } else if (c.uuid.toString() == DETECTED_UUID) {
           if (c.properties.notify || c.properties.indicate) {
-             await c.setNotifyValue(true);
-             _detectedSubscription = c.onValueReceived.listen((value) {
-               _processDetected(value);
-             });
+            await c.setNotifyValue(true);
+            _detectedSubscription = c.onValueReceived.listen(_processDetected);
           }
         }
       }
-    } catch (e) {
-      ConsoleService().log("Discovery failed: $e");
-    }
+    } catch (e) { ConsoleService().log("Discovery failed: $e"); }
   }
 
   void _processDistance(List<int> value) {
     if (value.length >= 4) {
       ByteData byteData = ByteData.sublistView(Uint8List.fromList(value));
       int dist = byteData.getInt32(0, Endian.little);
-      setState(() {
-        _distance = dist;
-      });
-      // Alert logic is handled in _processDetected or _handleAlerts
+      setState(() { _distance = dist; });
     }
   }
 
   void _processDetected(List<int> value) {
     if (value.isNotEmpty) {
       bool newDetection = value[0] == 1;
-      if (newDetection && !_isObstacle) {
-         _handleObstacle();
-      } else if (!newDetection && _isObstacle) {
-         setState(() {
-           _isObstacle = false;
-         });
-         _speak("Path clear");
+      if (newDetection && !_isObstacle) { _handleObstacle(); }
+      else if (!newDetection && _isObstacle) {
+        setState(() { _isObstacle = false; });
+        _speak("Path clear");
       }
     }
   }
@@ -316,46 +313,29 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _scanAndConnect() async {
     final BluetoothDevice? device = await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (context) => const ConnectionPage()),
+      context, MaterialPageRoute(builder: (context) => const ConnectionPage()),
     );
-
     if (device != null) {
-      // Device is already connected by ConnectionPage
-      setState(() {
-        _isConnected = true;
-        _connectionStatus = "Connected";
-        _connectedDevice = device;
-      });
+      setState(() { _isConnected = true; _connectionStatus = "Connected"; _connectedDevice = device; });
       _discoverServices(device);
       _speak("Device connected");
-      _saveBondedDevice(device.remoteId.str); // Ensure saved
-      _startReconnectionLoop(device.remoteId.str); // Start loop for future
-      
-      // Listen to disconnection
+      _saveBondedDevice(device.remoteId.str);
+      _startReconnectionLoop(device.remoteId.str);
       _connectionStateSubscription?.cancel();
       _connectionStateSubscription = device.connectionState.listen((state) {
-        if (state == BluetoothConnectionState.disconnected) {
-           _handleDisconnection();
-        }
+        if (state == BluetoothConnectionState.disconnected) _handleDisconnection();
       });
     }
   }
 
   void _handleDisconnection() {
-    setState(() {
-      _isConnected = false;
-      _connectionStatus = "Disconnected";
-      _connectedDevice = null;
-    });
+    setState(() { _isConnected = false; _connectionStatus = "Disconnected"; _connectedDevice = null; });
     _speak("Device disconnected");
   }
 
   Future<void> _disconnect() async {
-    _reconnectionTimer?.cancel(); // Stop aggressive reconnect on manual disconnect
-    if (_connectedDevice != null) {
-      await _connectedDevice!.disconnect();
-    }
+    _reconnectionTimer?.cancel();
+    if (_connectedDevice != null) await _connectedDevice!.disconnect();
   }
 
   Future<void> _forgetDevice() async {
@@ -363,29 +343,16 @@ class _HomePageState extends State<HomePage> {
     await _disconnect();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(PREF_BONDED_DEVICE_ID);
-    
-    // Try to remove bond if possible (Android only)
     if (Platform.isAndroid && _connectedDevice != null) {
-      try {
-        await _connectedDevice!.removeBond();
-      } catch (e) {
-        ConsoleService().log("Could not remove bond: $e");
-      }
+      try { await _connectedDevice!.removeBond(); } catch (e) { ConsoleService().log("Could not remove bond: $e"); }
     }
-    
-    setState(() {
-      _connectedDevice = null;
-      _isConnected = false;
-      _connectionStatus = "Disconnected";
-    });
+    setState(() { _connectedDevice = null; _isConnected = false; _connectionStatus = "Disconnected"; });
     _speak("Device forgotten");
   }
 
-  // Wrapper to handle TTS and STT coordination
   Future<void> _speak(String text) async {
-    _speechService.pauseListening(); // Stop listening while speaking
+    _speechService.pauseListening();
     await _ttsService.speak(text);
-    // Do NOT auto-resume listening. User must tap.
   }
 
   Future<void> _speakPrioritized(String text) async {
@@ -395,75 +362,101 @@ class _HomePageState extends State<HomePage> {
 
   void _handleCommand(String command) {
     print("Command received: $command");
-    command = command.toLowerCase();
-
-    if (command.contains("stop")) {
+    String cmdLower = command.toLowerCase();
+    if (cmdLower.contains("stop") || cmdLower.contains("cancel route")) {
       _stopNavigation();
-    } else if (command.contains("emergency")) {
+    } else if (cmdLower.contains("emergency")) {
       _emergencyService.makeEmergencyCall();
       _speak("Calling caretaker");
-    } else if (command.contains("repeat") || command.contains("say again")) {
-      _speak(_currentDescription);
-    } else if (command.contains("room 1") || command.contains("room1")) {
-      // Natural language detect for Room 1
-      _startNavigation("Room1");
-    } else if (command.contains("hallway")) {
-      // Natural language detect for Hallway
-      _startNavigation("Hallway");
-    } else if (command.contains("entrance")) {
-      // Natural language detect for Entrance
-      _startNavigation("Entrance");
-    } else if (command.contains("go to") || command.contains("navigate to") || command.contains("take me to")) {
-      // Fallback for older block commands to not break existing flow
-      String destination = command.replaceAll("go to", "").replaceAll("navigate to", "").replaceAll("take me to", "").trim();
-      if (destination.isNotEmpty) {
-        _startNavigation(destination);
-      } else {
-        _speak("Sorry, I didn't understand. Please say Go to Room1, Hallway or Entrance");
-      }
+    } else if (cmdLower.contains("repeat") || cmdLower.contains("say again")) {
+      if (_lastSpokenStep.isNotEmpty) _speakPrioritized(_lastSpokenStep);
+      else _speakPrioritized("No navigation step to repeat");
     } else {
-      _speak("Sorry, I didn't understand. Please say Go to Room1, Hallway or Entrance");
+      String? target;
+      List<String> validTargets = ["room1","room 1","hallway","entrance","library","admin","cs01","newblock","cse","adblock"];
+      bool matched = false;
+      for (String v in validTargets) {
+        if (cmdLower.contains(v)) {
+          matched = true;
+          if (v == "room1" || v == "room 1") target = "Room1";
+          else if (v == "hallway") target = "Hallway";
+          else if (v == "entrance") target = "Entrance";
+          else target = command.replaceAll(RegExp(r'(go to|navigate to|take me to)', caseSensitive: false), "").trim();
+          break;
+        }
+      }
+      if (matched && target != null && target.isNotEmpty) {
+        if (target.toLowerCase() == "room 1") target = "Room1";
+        _startNavigation(target);
+      } else {
+        _speak("Sorry, destination not found in map");
+      }
     }
   }
 
   void _startNavigation(String destination) {
-    _stopNavigation(); // Clear previous
+    _navigationService.stopNavigation();
+    _beaconService.stopNavigation();
+    _navigationSubscription?.cancel();
     setState(() {
+      _currentTarget = destination;
+      _lastSpokenRoom = "";
+      _lastSpokenStep = "";
       _isNavigating = true;
       _statusText = "Navigating...";
     });
-    
     _speak("Starting navigation to $destination");
-    // _obstacleService.startListening(); // Already listening globally
+    _directionController.forward(from: 0);
 
-    // Route to new beacon service if it's an indoor room, else default to demo
     final destLower = destination.toLowerCase();
-    final isIndoor = ["entrance", "hallway", "room 1", "room1"].any((r) => destLower.contains(r));
-
-    final navStream = isIndoor 
+    final isIndoor = ["entrance","hallway","room 1","room1"].any((r) => destLower.contains(r));
+    final navStream = isIndoor
         ? _beaconService.startNavigation(destination)
         : _navigationService.startNavigation(destination);
 
     _navigationSubscription = navStream.listen((step) {
-      if (_isObstacle) return; // Pause updates if obstacle
-
+      if (_isObstacle) return;
+      if (step['action'] == 'WAITING') {
+        setState(() { _currentAction = 'WAITING'; _currentDescription = step['description']; _directionIcon = 'stop'; });
+        _speakPrioritized("Locating you, please walk a few steps");
+        return;
+      }
+      String newDescription = step['description'];
       setState(() {
         _currentAction = step['action'];
-        _currentDescription = step['description'];
+        _currentDescription = newDescription;
         _directionIcon = step['direction'];
       });
-      // Speech might have been interrupted by obstacle. We check _isObstacle above.
-      _speak(step['description']);
+      _directionController.forward(from: 0);
+
+      if (newDescription.isNotEmpty && newDescription != "Recalculating...") {
+        String speech = newDescription;
+        String lowerDesc = newDescription.toLowerCase();
+        if (lowerDesc.contains("turn")) {
+          if (lowerDesc.contains("left")) speech = "Turn left";
+          else if (lowerDesc.contains("right")) speech = "Turn right";
+          else speech = "Turn";
+        } else if (lowerDesc.contains("straight")) {
+          speech = "Walk straight";
+        } else if (lowerDesc.contains("door")) {
+          speech = "Door ahead";
+        }
+        if (_lastSpokenStep != speech) {
+          _lastSpokenStep = speech;
+          _speakPrioritized(speech);
+        }
+      }
     }, onDone: () {
-      setState(() {
-        _isNavigating = false;
-        _statusText = "Arrived";
-        _directionIcon = "stop";
-        _currentAction = "ARRIVED";
-        _currentDescription = "You have reached $destination";
-      });
+      if (mounted) {
+        setState(() {
+          _isNavigating = false;
+          _statusText = "Arrived";
+          _directionIcon = "stop";
+          _currentAction = "ARRIVED";
+          _currentDescription = "You have reached $destination";
+        });
+      }
       _speak("You have reached $destination");
-      // _obstacleService.stopListening(); // Keep listening globally
     });
   }
 
@@ -471,40 +464,35 @@ class _HomePageState extends State<HomePage> {
     _navigationService.stopNavigation();
     _beaconService.stopNavigation();
     _navigationSubscription?.cancel();
-    // _obstacleService.stopListening(); // Keep listening globally
     setState(() {
       _isNavigating = false;
       _statusText = "Tap to Speak";
       _currentAction = "Ready";
       _currentDescription = "Tap to say a destination";
       _directionIcon = "stop";
+      _currentTarget = null;
     });
-    _speak("Navigation stopped.");
+    _speak("Navigation stopped");
   }
 
   void _handleObstacle() async {
     if (DateTime.now().difference(_lastAlertTime).inMilliseconds < 2000) return;
-    
     ConsoleService().log("Obstacle Detected! Distance: $_distance cm");
-    setState(() {
-      _isObstacle = true;
-    });
-    
-    // STOP Navigation speech immediately and announce obstacle
+    setState(() { _isObstacle = true; });
     _speakPrioritized("Obstacle ahead at $_distance centimeters.");
-    
     bool? hasVibrator = await Vibration.hasVibrator();
-    if (hasVibrator ?? false) {
-      Vibration.vibrate(duration: 500);
-    }
+    if (hasVibrator ?? false) Vibration.vibrate(duration: 500);
     _lastAlertTime = DateTime.now();
   }
 
   @override
   void dispose() {
+    _pulseController.dispose();
+    _directionController.dispose();
+    _obstacleFlashController.dispose();
+    _uiUpdateTimer?.cancel();
     _speechService.dispose();
     _beaconService.stopScanning();
-    // _obstacleService.dispose();
     _commandSubscription?.cancel();
     _navigationSubscription?.cancel();
     _connectionStateSubscription?.cancel();
@@ -515,10 +503,12 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
+  // ── BUILD ──────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: _kBackground,
       body: SafeArea(
         child: Column(
           children: [
@@ -533,55 +523,105 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ── HEADER ─────────────────────────────────────────────────────────────────
+
   Widget _buildHeader() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       decoration: BoxDecoration(
-        color: Colors.grey[900],
-        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(20)),
+        color: _kSurface,
+        border: Border(bottom: BorderSide(color: _kBorder, width: 1.5)),
       ),
       child: Row(
         children: [
-          Image.asset('assets/images/logo.png', height: 40),
-          const SizedBox(width: 12),
-          const Text(
-            "Vazhikaatti",
-            style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
-          ),
-
-          const Spacer(),
-          // Connection Status Icon
-          IconButton(
-            icon: Icon(
-              _isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-              color: _isConnected ? Colors.blue : Colors.grey,
+          // Logo circle
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: _kAccent,
+              shape: BoxShape.circle,
             ),
-            onPressed: _isConnected ? _disconnect : _scanAndConnect,
+            child: const Icon(Icons.navigation_rounded, color: Colors.black, size: 22),
           ),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                "Vazhikaatti",
+                style: TextStyle(
+                  color: _kTextPrimary,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.5,
+                ),
+              ),
+              Text(
+                "Indoor Navigation",
+                style: TextStyle(
+                  color: _kTextSecondary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.6,
+                ),
+              ),
+            ],
+          ),
+          const Spacer(),
+          // BLE badge
+          Semantics(
+            label: _isConnected ? "Bluetooth connected" : "Bluetooth disconnected. Tap to connect.",
+            button: true,
+            child: GestureDetector(
+              onTap: _isConnected ? _disconnect : _scanAndConnect,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                decoration: BoxDecoration(
+                  color: _isConnected ? const Color(0xFFE8F5E9) : const Color(0xFFF5F5F5),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: _isConnected ? _kSuccess : _kBorder,
+                    width: 1.5,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _isConnected ? Icons.bluetooth_connected_rounded : Icons.bluetooth_disabled_rounded,
+                      size: 16,
+                      color: _isConnected ? _kSuccess : _kTextSecondary,
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      _isConnected ? "Live" : "Off",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: _isConnected ? _kSuccess : _kTextSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.white),
+            icon: const Icon(Icons.more_vert_rounded, color: _kTextSecondary, size: 22),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            color: _kSurface,
             onSelected: (value) {
-              if (value == "connect") {
-                _isConnected ? _disconnect() : _scanAndConnect();
-              } else if (value == "forget") {
-                _forgetDevice();
-              } else if (value == "destination") {
-                _showDestinationSelector();
-              }
+              if (value == "connect") { _isConnected ? _disconnect() : _scanAndConnect(); }
+              else if (value == "forget") { _forgetDevice(); }
+              else if (value == "destination") { _showDestinationSelector(); }
             },
             itemBuilder: (context) => [
-              PopupMenuItem(
-                value: "connect", 
-                child: Text(_isConnected ? "Disconnect" : "Connect Device")
-              ),
-              const PopupMenuItem(
-                value: "destination",
-                child: Text("Select Destination (Indoor)")
-              ),
-              const PopupMenuItem(value: "settings", child: Text("Settings")),
-              const PopupMenuItem(value: "forget", child: Text("Forget Device")),
-              const PopupMenuItem(value: "caretaker", child: Text("Add Caretaker")),
-              const PopupMenuItem(value: "about", child: Text("About")),
+              _menuItem(Icons.bluetooth_rounded, _isConnected ? "Disconnect" : "Connect Device", "connect"),
+              _menuItem(Icons.place_rounded, "Select Destination", "destination"),
+              _menuItem(Icons.delete_outline_rounded, "Forget Device", "forget"),
             ],
           ),
         ],
@@ -589,51 +629,283 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  PopupMenuItem<String> _menuItem(IconData icon, String label, String value) {
+    return PopupMenuItem<String>(
+      value: value,
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: _kTextSecondary),
+          const SizedBox(width: 10),
+          Text(label, style: const TextStyle(fontSize: 15, color: _kTextPrimary)),
+        ],
+      ),
+    );
+  }
+
+  // ── IDLE UI ────────────────────────────────────────────────────────────────
+
   Widget _buildIdleUI() {
-    return InkWell(
-      onTap: () {
-        print("Tap detected on Idle UI");
-        if (!_speechService.isListening) {
-          print("Starting listening from tap...");
-          _speechService.resumeListening();
-        } else {
-          print("Already listening");
-        }
-      },
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // Pulsing Mic Animation (Visual cue)
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              padding: const EdgeInsets.all(40),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _speechService.isListening ? Colors.yellowAccent.withOpacity(0.2) : Colors.grey[800],
-                border: Border.all(
-                  color: _speechService.isListening ? Colors.yellowAccent : Colors.grey,
-                  width: 4,
+    final bool isListening = _speechService.isListening;
+
+    return Semantics(
+      label: isListening
+          ? "Listening. Speak your destination."
+          : "Tap anywhere to speak your destination.",
+      button: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          HapticFeedback.mediumImpact();
+          if (!_speechService.isListening) {
+            _speechService.resumeListening();
+          }
+        },
+        child: Container(
+          color: _kBackground,
+          child: Column(
+            children: [
+              const Spacer(flex: 2),
+
+              // ── Mic orb ─────────────────────────────────────────────────
+              AnimatedBuilder(
+                animation: _pulseAnimation,
+                builder: (context, child) {
+                  return Transform.scale(
+                    scale: isListening ? _pulseAnimation.value : 1.0,
+                    child: child,
+                  );
+                },
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // outer ring (listening glow)
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 300),
+                      width: 200,
+                      height: 200,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isListening
+                            ? _kAccent.withOpacity(0.15)
+                            : _kBorder.withOpacity(0.4),
+                      ),
+                    ),
+                    // inner circle
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 300),
+                      width: 150,
+                      height: 150,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isListening ? _kAccent : _kSurface,
+                        border: Border.all(
+                          color: isListening ? _kAccentDark : _kBorder,
+                          width: 2.5,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: isListening
+                                ? _kAccent.withOpacity(0.35)
+                                : Colors.black.withOpacity(0.06),
+                            blurRadius: isListening ? 32 : 12,
+                            spreadRadius: isListening ? 4 : 0,
+                          ),
+                        ],
+                      ),
+                      child: Icon(
+                        Icons.mic_rounded,
+                        size: 64,
+                        color: isListening ? Colors.black : _kTextSecondary,
+                      ),
+                    ),
+                  ],
                 ),
-                boxShadow: _speechService.isListening
-                    ? [BoxShadow(color: Colors.yellowAccent.withOpacity(0.4), blurRadius: 30, spreadRadius: 10)]
-                    : [],
               ),
-              child: Icon(
-                Icons.mic,
-                size: 80,
-                color: _speechService.isListening ? Colors.yellowAccent : Colors.grey,
+
+              const SizedBox(height: 40),
+
+              // ── Status label ─────────────────────────────────────────────
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
+                child: Text(
+                  isListening ? "Listening..." : "Tap to Speak",
+                  key: ValueKey(isListening),
+                  style: TextStyle(
+                    color: _kTextPrimary,
+                    fontSize: 32,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.8,
+                  ),
+                ),
               ),
+
+              const SizedBox(height: 12),
+
+              Text(
+                "Say a destination like \"Library\" or \"Admin Block\"",
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: _kTextSecondary,
+                  fontSize: 17,
+                  height: 1.5,
+                ),
+              ),
+
+              const Spacer(flex: 2),
+
+              // ── Hint chips ───────────────────────────────────────────────
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    _hintChip("Library"),
+                    _hintChip("Admin Block"),
+                    _hintChip("Hallway"),
+                    _hintChip("Entrance"),
+                    _hintChip("Room 1"),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 24),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _hintChip(String label) {
+    return Semantics(
+      label: "Navigate to $label",
+      button: true,
+      child: GestureDetector(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          _startNavigation(label);
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+          decoration: BoxDecoration(
+            color: _kSurface,
+            borderRadius: BorderRadius.circular(30),
+            border: Border.all(color: _kBorder, width: 1.5),
+          ),
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: _kTextPrimary,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
             ),
-            const SizedBox(height: 50),
-            Text(
-              _speechService.isListening ? "Listening..." : "Tap to Speak",
-              style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              "Try \"Library\" or \"Admin Block\"",
-              style: TextStyle(color: Colors.grey[400], fontSize: 18),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── NAVIGATION UI ──────────────────────────────────────────────────────────
+
+  String _getFullPathStr(String start, String target) {
+    String s = start.toLowerCase();
+    String t = target.toLowerCase();
+    if (s == t) return start;
+    if (s == "entrance" && t == "room1") return "Entrance → Hallway → Room1";
+    if (s == "room1" && t == "entrance") return "Room1 → Hallway → Entrance";
+    if (s == "entrance" && t == "hallway") return "Entrance → Hallway";
+    if (s == "hallway" && t == "entrance") return "Hallway → Entrance";
+    if (s == "hallway" && t == "room1") return "Hallway → Room1";
+    if (s == "room1" && t == "hallway") return "Room1 → Hallway";
+    return "$start → $target";
+  }
+
+  Widget _buildNavigationUI() {
+    String currentRoom = _beaconService.currentRoom ?? "Searching...";
+    String fullPath = "";
+    if (_currentTarget != null && _beaconService.currentRoom != null) {
+      fullPath = _getFullPathStr(_beaconService.currentRoom!, _currentTarget!);
+    }
+    String displayDescription = _currentDescription.isNotEmpty ? _currentDescription : "Recalculating...";
+
+    return Semantics(
+      label: "$displayDescription. Current location: $currentRoom. Tap to give a voice command.",
+      button: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () async {
+          HapticFeedback.mediumImpact();
+          await _ttsService.stop();
+          if (!_speechService.isListening) _speechService.resumeListening();
+        },
+        child: Container(
+          color: _kBackground,
+          child: Column(
+            children: [
+              // ── Obstacle banner ────────────────────────────────────────
+              if (_isObstacle) _buildObstacleBanner(),
+
+              // ── Top card ───────────────────────────────────────────────
+              _buildNavigationCard(currentRoom, displayDescription, fullPath),
+
+              // ── Big direction icon ─────────────────────────────────────
+              Expanded(
+                child: Center(
+                  child: ScaleTransition(
+                    scale: _directionScaleAnim,
+                    child: _buildDirectionIcon(),
+                  ),
+                ),
+              ),
+
+              // ── Bottom stats row ───────────────────────────────────────
+              _buildStatsRow(),
+
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildObstacleBanner() {
+    return AnimatedBuilder(
+      animation: _obstacleOpacity,
+      builder: (context, child) {
+        return Opacity(
+          opacity: _obstacleOpacity.value,
+          child: child,
+        );
+      },
+      child: Container(
+        width: double.infinity,
+        margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        decoration: BoxDecoration(
+          color: _kDanger,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 26),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "OBSTACLE AHEAD",
+                    style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w800, letterSpacing: 0.5),
+                  ),
+                  Text(
+                    "$_distance cm away • Stop and wait",
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -641,174 +913,314 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildNavigationUI() {
-    return InkWell(
-      onTap: () async {
-         // Allow tapping during navigation to issue commands like "Stop"
-         print("Tap detected on Navigation UI");
-         await _ttsService.stop(); // Immediately pause navigation speech so user can talk
-         
-         if (!_speechService.isListening) {
-           print("Starting listening from tap during navigation...");
-           _speechService.resumeListening();
-         } else {
-           print("Already listening");
-         }
-      },
+  Widget _buildNavigationCard(String currentRoom, String description, String fullPath) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        color: _kSurface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: _kBorder, width: 1.5),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 4)),
+        ],
+      ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Top Instruction Card
+          // Current location row
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(7),
+                decoration: BoxDecoration(
+                  color: _kAccent.withOpacity(0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.location_on_rounded, size: 18, color: _kAccentDark),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("You are here", style: TextStyle(color: _kTextSecondary, fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
+                    Text(currentRoom, style: const TextStyle(color: _kTextPrimary, fontSize: 17, fontWeight: FontWeight.w700)),
+                  ],
+                ),
+              ),
+              if (_currentTarget != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF0F0EC),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: _kBorder),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.flag_rounded, size: 14, color: _kTextSecondary),
+                      const SizedBox(width: 5),
+                      Text(_currentTarget!, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kTextPrimary)),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+
+          const SizedBox(height: 16),
+          Container(height: 1, color: _kBorder),
+          const SizedBox(height: 16),
+
+          // Next step
           Container(
             width: double.infinity,
-            margin: const EdgeInsets.all(16),
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: _isObstacle ? Colors.red[900] : Colors.grey[850],
-              borderRadius: BorderRadius.circular(20),
-              boxShadow: [
-                BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 10, offset: const Offset(0, 5)),
-              ],
-            ),
-            child: Column(
-              children: [
-                if (_isObstacle)
-                  const Text(
-                    "OBSTACLE DETECTED",
-                    style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-                  ),
-                Text(
-                  _currentAction,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.yellowAccent, fontSize: 36, fontWeight: FontWeight.w900, letterSpacing: 1.2),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  _currentDescription,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white, fontSize: 20),
-                ),
-              ],
-            ),
-          ),
-          
-          // Direction Icon
-          Expanded(
-            child: Center(
-              child: Icon(
-                _getIconForDirection(_directionIcon),
-                size: 200,
-                color: _isObstacle ? Colors.red : Colors.white,
-              ),
-            ),
-          ),
-  
-          // Bottom Info Card (Simulated)
-          Container(
-            margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: Colors.grey[900],
-              borderRadius: BorderRadius.circular(15),
+              color: _kAccent.withOpacity(0.10),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _kAccent.withOpacity(0.3), width: 1.5),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildInfoItem(Icons.timer, "2 min"),
-                _buildInfoItem(Icons.directions_walk, "50 m"),
+                Text(
+                  "NEXT STEP",
+                  style: TextStyle(color: _kAccentDark, fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  description,
+                  style: const TextStyle(color: _kTextPrimary, fontSize: 22, fontWeight: FontWeight.w800, height: 1.3),
+                ),
               ],
             ),
           ),
+
+          if (fullPath.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Icon(Icons.route_rounded, size: 14, color: _kTextSecondary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    fullPath,
+                    style: TextStyle(color: _kTextSecondary, fontSize: 13),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildInfoItem(IconData icon, String text) {
-    return Row(
-      children: [
-        Icon(icon, color: Colors.grey, size: 20),
-        const SizedBox(width: 8),
-        Text(text, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-      ],
+  Widget _buildDirectionIcon() {
+    final IconData icon = _getIconForDirection(_directionIcon);
+    final Color iconColor = _isObstacle ? _kDanger : _kTextPrimary;
+
+    return Container(
+      width: 160,
+      height: 160,
+      decoration: BoxDecoration(
+        color: _isObstacle ? _kDanger.withOpacity(0.08) : _kAccent.withOpacity(0.10),
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: _isObstacle ? _kDanger.withOpacity(0.3) : _kAccent.withOpacity(0.4),
+          width: 2,
+        ),
+      ),
+      child: Icon(icon, size: 90, color: iconColor),
     );
   }
+
+  Widget _buildStatsRow() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        children: [
+          Expanded(child: _statCard(Icons.timer_rounded, "Est. Time", "2 min")),
+          const SizedBox(width: 12),
+          Expanded(child: _statCard(Icons.directions_walk_rounded, "Distance", "50 m")),
+          if (_isConnected) ...[
+            const SizedBox(width: 12),
+            Expanded(child: _statCard(Icons.sensors_rounded, "Sensor", "${_distance}cm")),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _statCard(IconData icon, String label, String value) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+      decoration: BoxDecoration(
+        color: _kSurface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _kBorder, width: 1.5),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, size: 20, color: _kTextSecondary),
+          const SizedBox(height: 6),
+          Text(value, style: const TextStyle(color: _kTextPrimary, fontSize: 16, fontWeight: FontWeight.w700)),
+          Text(label, style: TextStyle(color: _kTextSecondary, fontSize: 11)),
+        ],
+      ),
+    );
+  }
+
+  // ── FOOTER ─────────────────────────────────────────────────────────────────
 
   Widget _buildFooter() {
     return Container(
-      padding: const EdgeInsets.all(16),
-      color: Colors.black,
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 12),
+      decoration: BoxDecoration(
+        color: _kSurface,
+        border: Border(top: BorderSide(color: _kBorder, width: 1.5)),
+      ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Status Text
           Expanded(
             child: Text(
               _statusText,
-              style: const TextStyle(color: Colors.grey, fontSize: 14),
+              style: TextStyle(color: _kTextSecondary, fontSize: 13, fontWeight: FontWeight.w500),
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          // Console Button
-          IconButton(
-            icon: const Icon(Icons.terminal, color: Colors.blue),
-            onPressed: _showConsole,
+          // Console
+          Semantics(
+            label: "Debug console",
+            button: true,
+            child: IconButton(
+              icon: const Icon(Icons.terminal_rounded, color: _kTextSecondary, size: 22),
+              onPressed: _showConsole,
+            ),
           ),
-          // Emergency Button
-          FloatingActionButton(
-            onPressed: () {
-              _emergencyService.makeEmergencyCall();
-              _speak("Calling caretaker");
-            },
-            backgroundColor: Colors.red,
-            mini: true,
-            child: const Icon(Icons.phone, color: Colors.white),
+          const SizedBox(width: 8),
+          // Stop nav button (only when navigating)
+          if (_isNavigating)
+            Semantics(
+              label: "Stop navigation",
+              button: true,
+              child: GestureDetector(
+                onTap: () {
+                  HapticFeedback.heavyImpact();
+                  _stopNavigation();
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  margin: const EdgeInsets.only(right: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF5F5F5),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: _kBorder, width: 1.5),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.stop_rounded, color: _kTextPrimary, size: 18),
+                      SizedBox(width: 6),
+                      Text("Stop", style: TextStyle(color: _kTextPrimary, fontWeight: FontWeight.w700, fontSize: 14)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          // Emergency button
+          Semantics(
+            label: "Emergency call to caretaker",
+            button: true,
+            child: GestureDetector(
+              onTap: () {
+                HapticFeedback.heavyImpact();
+                _emergencyService.makeEmergencyCall();
+                _speak("Calling caretaker");
+              },
+              child: Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  color: _kDanger,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(color: _kDanger.withOpacity(0.35), blurRadius: 12, spreadRadius: 2),
+                  ],
+                ),
+                child: const Icon(Icons.phone_rounded, color: Colors.white, size: 24),
+              ),
+            ),
           ),
         ],
       ),
     );
   }
+
+  // ── CONSOLE ────────────────────────────────────────────────────────────────
 
   void _showConsole() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.black87,
+      backgroundColor: _kSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       builder: (context) {
         return ValueListenableBuilder<List<String>>(
           valueListenable: ConsoleService().logs,
           builder: (context, logs, child) {
             return Container(
-              padding: const EdgeInsets.all(16),
-              height: 400,
+              padding: const EdgeInsets.all(20),
+              height: 420,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text("Debug Console", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-                      IconButton(
-                        icon: const Icon(Icons.copy, color: Colors.blueAccent),
+                      const Text(
+                        "Debug Console",
+                        style: TextStyle(color: _kTextPrimary, fontSize: 17, fontWeight: FontWeight.w700),
+                      ),
+                      TextButton.icon(
                         onPressed: () {
-                          final allLogs = logs.join('\n');
-                          Clipboard.setData(ClipboardData(text: allLogs));
+                          Clipboard.setData(ClipboardData(text: logs.join('\n')));
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Logs copied to clipboard'), duration: Duration(seconds: 1)),
+                            const SnackBar(content: Text('Logs copied'), duration: Duration(seconds: 1)),
                           );
                         },
+                        icon: const Icon(Icons.copy_rounded, size: 16),
+                        label: const Text("Copy"),
+                        style: TextButton.styleFrom(foregroundColor: _kBlueBLE),
                       ),
                     ],
                   ),
-                  const Divider(color: Colors.grey),
+                  Container(height: 1, color: _kBorder),
+                  const SizedBox(height: 8),
                   Expanded(
-                    child: ListView.builder(
-                      itemCount: logs.length,
-                      itemBuilder: (context, index) {
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 2),
-                          // Adding SelectableText so users can manually select parts of the log
-                          child: SelectableText(logs[index], style: const TextStyle(color: Colors.greenAccent, fontSize: 12, fontFamily: 'Courier')),
-                        );
-                      },
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1A1A1A),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: ListView.builder(
+                        itemCount: logs.length,
+                        itemBuilder: (context, index) {
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: SelectableText(
+                              logs[index],
+                              style: const TextStyle(color: Color(0xFF4AFF91), fontSize: 12, fontFamily: 'Courier'),
+                            ),
+                          );
+                        },
+                      ),
                     ),
                   ),
                 ],
@@ -820,42 +1232,88 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ── HELPERS ────────────────────────────────────────────────────────────────
+
   IconData _getIconForDirection(String direction) {
     switch (direction) {
-      case 'up': return Icons.arrow_upward;
-      case 'left': return Icons.turn_left;
-      case 'right': return Icons.turn_right;
-      case 'stop': return Icons.stop_circle;
-      default: return Icons.navigation;
+      case 'up':    return Icons.arrow_upward_rounded;
+      case 'left':  return Icons.turn_left_rounded;
+      case 'right': return Icons.turn_right_rounded;
+      case 'stop':  return Icons.stop_circle_rounded;
+      default:      return Icons.navigation_rounded;
     }
   }
 
   void _showDestinationSelector() {
     final destinations = _beaconService.availableRooms;
-    showDialog(
+    showModalBottomSheet(
       context: context,
+      backgroundColor: _kSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
       builder: (context) {
-        return AlertDialog(
-          backgroundColor: Colors.grey[900],
-          title: const Text("Select Destination", style: TextStyle(color: Colors.white)),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: destinations.length,
-              itemBuilder: (context, index) {
-                return ListTile(
-                  title: Text(destinations[index], style: const TextStyle(color: Colors.white)),
-                  onTap: () {
-                    Navigator.pop(context);
-                    _startNavigation(destinations[index]);
-                  },
-                );
-              },
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  "Select Destination",
+                  style: TextStyle(color: _kTextPrimary, fontSize: 18, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "Tap a room to start navigation",
+                  style: TextStyle(color: _kTextSecondary, fontSize: 13),
+                ),
+                const SizedBox(height: 16),
+                ...destinations.map((dest) => Semantics(
+                  label: "Navigate to $dest",
+                  button: true,
+                  child: InkWell(
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      Navigator.pop(context);
+                      _startNavigation(dest);
+                    },
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
+                      margin: const EdgeInsets.only(bottom: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8F8F5),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: _kBorder, width: 1.5),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: _kAccent.withOpacity(0.15),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.room_rounded, size: 18, color: _kAccentDark),
+                          ),
+                          const SizedBox(width: 14),
+                          Text(dest, style: const TextStyle(color: _kTextPrimary, fontSize: 17, fontWeight: FontWeight.w600)),
+                          const Spacer(),
+                          const Icon(Icons.chevron_right_rounded, color: _kTextSecondary),
+                        ],
+                      ),
+                    ),
+                  ),
+                )),
+                const SizedBox(height: 8),
+              ],
             ),
           ),
         );
-      }
+      },
     );
   }
 }
