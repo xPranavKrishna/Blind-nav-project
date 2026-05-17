@@ -164,6 +164,21 @@ class BeaconNavigationService {
     return _nearestNode();
   }
 
+  /// Real distance to next waypoint in metres.
+  /// Returns null if not navigating or position unknown.
+  double? get distanceToNextWaypoint {
+    if (!_isNavigating || _currentPath.isEmpty ||
+        _userX == null || _userY == null) return null;
+
+    final targetIdx = (_currentStepIndex + 1)
+        .clamp(0, _currentPath.length - 1);
+    if (targetIdx <= _currentStepIndex) return null;
+
+    final nodes = _mapData['nodes'] as Map<String, List<double>>;
+    final targetCoords = nodes[_currentPath[targetIdx]]!;
+    return _dist(_userX!, _userY!, targetCoords[0], targetCoords[1]);
+  }
+
   List<String> get availableRooms =>
       ["Room1", "Room2", "Hallway", "Entrance"];
 

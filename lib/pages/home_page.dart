@@ -298,10 +298,17 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   void _processDetected(List<int> value) {
     if (value.isNotEmpty) {
       bool newDetection = value[0] == 1;
-      if (newDetection && !_isObstacle) { _handleObstacle(); }
-      else if (!newDetection && _isObstacle) {
+      if (newDetection && !_isObstacle) {
+        _handleObstacle();
+      } else if (!newDetection && _isObstacle) {
         setState(() { _isObstacle = false; });
-        _speak("Path clear");
+        _speakPrioritized("Path clear. Resuming navigation.").then((_) {
+          if (_isNavigating && _lastSpokenStep.isNotEmpty) {
+            Future.delayed(const Duration(milliseconds: 500), () {
+              if (mounted && !_isObstacle) _speakPrioritized(_lastSpokenStep);
+            });
+          }
+        });
       }
     }
   }
@@ -360,36 +367,95 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     await _ttsService.speakPrioritized(text);
   }
 
-  void _handleCommand(String command) {
+  void _handleCommand(String command) async {
     print("Command received: $command");
     String cmdLower = command.toLowerCase();
-    if (cmdLower.contains("stop") || cmdLower.contains("cancel route")) {
+
+    // ==================== EMERGENCY CALL ====================
+    if (cmdLower.contains("emergency") ||
+        cmdLower.contains("sos") ||
+        cmdLower.contains("caretaker") ||
+        cmdLower.contains("care taker") ||
+        (cmdLower.contains("call") && (
+            cmdLower.contains("help") ||
+            cmdLower.contains("caretaker") ||
+            cmdLower.contains("care") ||
+            cmdLower.contains("sos")
+        )) ||
+        (cmdLower.contains("help") && !_isValidDestination(cmdLower))) {
+      
+      bool success = await _emergencyService.makeEmergencyCall();
+      
+      if (success) {
+        _speak("Calling caretaker...");
+      } else {
+        _speak("No caretaker number saved. Please save one in settings.");
+      }
+      return;   // Important: Stop further processing
+    }
+    // =======================================================
+
+    // ── Stop navigation ──────────────────────────────────────────────────────
+    if (cmdLower.contains("stop") ||
+        cmdLower.contains("cancel") ||
+        cmdLower.contains("cancel route") ||
+        cmdLower.contains("end navigation") ||
+        cmdLower.contains("quit")) {
       _stopNavigation();
-    } else if (cmdLower.contains("emergency")) {
-      _emergencyService.makeEmergencyCall();
-      _speak("Calling caretaker");
-    } else if (cmdLower.contains("repeat") || cmdLower.contains("say again")) {
-      if (_lastSpokenStep.isNotEmpty) _speakPrioritized(_lastSpokenStep);
-      else _speakPrioritized("No navigation step to repeat");
+
+    // ── Connect device ───────────────────────────────────────────────────────
+    } else if (cmdLower.contains("connect") ||
+               cmdLower.contains("connect device") ||
+               cmdLower.contains("connect to device") ||
+               cmdLower.contains("pair device")) {
+      if (_isConnected) {
+        _speak("Device is already connected");
+      } else {
+        _speak("Opening device connection");
+        _scanAndConnect();
+      }
+
+    // ── Repeat last instruction ──────────────────────────────────────────────
+    } else if (cmdLower.contains("repeat") ||
+               cmdLower.contains("say again") ||
+               cmdLower.contains("what was that")) {
+      if (_lastSpokenStep.isNotEmpty) {
+        _speakPrioritized(_lastSpokenStep);
+      } else {
+        _speakPrioritized("No navigation step to repeat");
+      }
+
+    // ── Navigate to destination ──────────────────────────────────────────────
     } else {
       String? target;
-      List<String> validTargets = ["room1","room 1","hallway","entrance","library","admin","cs01","newblock","cse","adblock"];
+      List<String> validTargets = [
+        "room1", "room 1", "room2", "room 2",
+        "hallway", "entrance",
+        "library", "admin", "cs01", "newblock", "cse", "adblock"
+      ];
+
       bool matched = false;
       for (String v in validTargets) {
         if (cmdLower.contains(v)) {
           matched = true;
           if (v == "room1" || v == "room 1") target = "Room1";
+          else if (v == "room2" || v == "room 2") target = "Room2";
           else if (v == "hallway") target = "Hallway";
           else if (v == "entrance") target = "Entrance";
-          else target = command.replaceAll(RegExp(r'(go to|navigate to|take me to)', caseSensitive: false), "").trim();
+          else target = command
+              .replaceAll(
+                RegExp(r'(go to|navigate to|take me to|find)',
+                    caseSensitive: false),
+                "")
+              .trim();
           break;
         }
       }
+
       if (matched && target != null && target.isNotEmpty) {
-        if (target.toLowerCase() == "room 1") target = "Room1";
         _startNavigation(target);
       } else {
-        _speak("Sorry, destination not found in map");
+        _speak("Sorry, I didn't understand. Say a destination or say help.");
       }
     }
   }
@@ -430,20 +496,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _directionController.forward(from: 0);
 
       if (newDescription.isNotEmpty && newDescription != "Recalculating...") {
-        String speech = newDescription;
-        String lowerDesc = newDescription.toLowerCase();
-        if (lowerDesc.contains("turn")) {
-          if (lowerDesc.contains("left")) speech = "Turn left";
-          else if (lowerDesc.contains("right")) speech = "Turn right";
-          else speech = "Turn";
-        } else if (lowerDesc.contains("straight")) {
-          speech = "Walk straight";
-        } else if (lowerDesc.contains("door")) {
-          speech = "Door ahead";
-        }
-        if (_lastSpokenStep != speech) {
-          _lastSpokenStep = speech;
-          _speakPrioritized(speech);
+        if (_lastSpokenStep != newDescription) {
+          _lastSpokenStep = newDescription;
+          _speakPrioritized(newDescription);
         }
       }
     }, onDone: () {
@@ -477,12 +532,33 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   void _handleObstacle() async {
     if (DateTime.now().difference(_lastAlertTime).inMilliseconds < 2000) return;
+
     ConsoleService().log("Obstacle Detected! Distance: $_distance cm");
+
+    await _ttsService.stop(); // stop current speech first
+
     setState(() { _isObstacle = true; });
-    _speakPrioritized("Obstacle ahead at $_distance centimeters.");
+
+    final distText = _distance > 0 ? "at $_distance centimeters" : "detected";
+    _speakPrioritized("Obstacle $distText. Stop and wait.");
+
     bool? hasVibrator = await Vibration.hasVibrator();
     if (hasVibrator ?? false) Vibration.vibrate(duration: 500);
     _lastAlertTime = DateTime.now();
+
+    // Auto-clear if BLE drops
+    Future.delayed(const Duration(seconds: 10), () {
+      if (mounted && _isObstacle) {
+        setState(() { _isObstacle = false; });
+        _speakPrioritized("Obstacle timeout. Proceed with caution.").then((_) {
+          if (_isNavigating && _lastSpokenStep.isNotEmpty) {
+            Future.delayed(const Duration(milliseconds: 500), () {
+              if (mounted && !_isObstacle) _speakPrioritized(_lastSpokenStep);
+            });
+          }
+        });
+      }
+    });
   }
 
   @override
@@ -617,8 +693,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               if (value == "connect") { _isConnected ? _disconnect() : _scanAndConnect(); }
               else if (value == "forget") { _forgetDevice(); }
               else if (value == "destination") { _showDestinationSelector(); }
+              else if (value == "caretaker") { _showCaretakerSetup(); }
             },
             itemBuilder: (context) => [
+              _menuItem(Icons.phone_rounded, "Add Caretaker", "caretaker"),
               _menuItem(Icons.bluetooth_rounded, _isConnected ? "Disconnect" : "Connect Device", "connect"),
               _menuItem(Icons.place_rounded, "Select Destination", "destination"),
               _menuItem(Icons.delete_outline_rounded, "Forget Device", "forget"),
@@ -1040,17 +1118,36 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Widget _buildStatsRow() {
+    final double? navDist = _beaconService.distanceToNextWaypoint;
+
+    // If nothing real to show, hide the row entirely
+    if (navDist == null && !_isConnected) return const SizedBox.shrink();
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
-          Expanded(child: _statCard(Icons.timer_rounded, "Est. Time", "2 min")),
-          const SizedBox(width: 12),
-          Expanded(child: _statCard(Icons.directions_walk_rounded, "Distance", "50 m")),
-          if (_isConnected) ...[
+          // Real: distance to next waypoint from beacon service
+          if (navDist != null) ...[
+            Expanded(
+              child: _statCard(
+                Icons.directions_walk_rounded,
+                "To Waypoint",
+                "${navDist.toStringAsFixed(1)} m",
+              ),
+            ),
             const SizedBox(width: 12),
-            Expanded(child: _statCard(Icons.sensors_rounded, "Sensor", "${_distance}cm")),
           ],
+
+          // Real: live obstacle sensor distance from ESP32
+          if (_isConnected)
+            Expanded(
+              child: _statCard(
+                Icons.sensors_rounded,
+                "Obstacle",
+                _distance > 0 ? "$_distance cm" : "Clear",
+              ),
+            ),
         ],
       ),
     );
@@ -1137,10 +1234,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             label: "Emergency call to caretaker",
             button: true,
             child: GestureDetector(
-              onTap: () {
+              onTap: () async {
                 HapticFeedback.heavyImpact();
-                _emergencyService.makeEmergencyCall();
-                _speak("Calling caretaker");
+                final called = await _emergencyService.makeEmergencyCall();
+                if (called) {
+                  _speak("Calling caretaker");
+                } else {
+                  _speak("No caretaker number saved. Please add one in settings.");
+                  _showCaretakerSetup(); // opens setup dialog
+                }
               },
               child: Container(
                 width: 52,
@@ -1244,6 +1346,164 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
   }
 
+  void _showCaretakerSetup() async {
+    // Load existing number
+    final existing = await _emergencyService.getCaretakerNumber();
+    final TextEditingController controller =
+        TextEditingController(text: existing ?? "");
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _kSurface,
+      isScrollControlled: true, // allows keyboard to push sheet up
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (context) {
+        return Padding(
+          // Push sheet above keyboard
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+          ),
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Title
+                  const Text(
+                    "Caretaker Number",
+                    style: TextStyle(
+                      color: _kTextPrimary,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    "This number will be called in emergencies",
+                    style: TextStyle(color: _kTextSecondary, fontSize: 13),
+                  ),
+                  const SizedBox(height: 20),
+
+                  // Phone input
+                  TextField(
+                    controller: controller,
+                    keyboardType: TextInputType.phone,
+                    autofocus: true,
+                    style: const TextStyle(
+                      color: _kTextPrimary,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 1.2,
+                    ),
+                    decoration: InputDecoration(
+                      hintText: "+91 98765 43210",
+                      hintStyle: TextStyle(color: _kTextSecondary.withOpacity(0.5), fontSize: 18),
+                      prefixIcon: const Icon(Icons.phone_rounded, color: _kAccentDark),
+                      filled: true,
+                      fillColor: const Color(0xFFF8F8F5),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(color: _kBorder, width: 1.5),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(color: _kBorder, width: 1.5),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(color: _kAccent, width: 2),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  // Save button
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () async {
+                        final number = controller.text.trim();
+                        if (number.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text("Please enter a phone number")),
+                          );
+                          return;
+                        }
+                        await _emergencyService.saveCaretakerNumber(number);
+                        if (mounted) {
+                          Navigator.pop(context);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text("Caretaker number saved ✓")),
+                          );
+                          _speak("Caretaker number saved");
+                        }
+                      },
+                      icon: const Icon(Icons.save_rounded),
+                      label: const Text(
+                        "Save Number",
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _kAccent,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  // Delete button (only show if number exists)
+                  if (existing != null && existing.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          await _emergencyService.deleteCaretakerNumber();
+                          if (mounted) {
+                            Navigator.pop(context);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text("Caretaker number deleted")),
+                            );
+                            _speak("Caretaker number deleted");
+                          }
+                        },
+                        icon: const Icon(Icons.delete_outline_rounded, color: _kDanger),
+                        label: const Text(
+                          "Delete Number",
+                          style: TextStyle(
+                            color: _kDanger,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          side: BorderSide(color: _kDanger.withOpacity(0.4), width: 1.5),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void _showDestinationSelector() {
     final destinations = _beaconService.availableRooms;
     showModalBottomSheet(
@@ -1315,5 +1575,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         );
       },
     );
+  }
+
+  bool _isValidDestination(String cmd) {
+    const destinations = [
+      "room1", "room 1", "room2", "room 2",
+      "hallway", "entrance", "library", "admin",
+      "cs01", "newblock", "cse", "adblock"
+    ];
+    return destinations.any((d) => cmd.contains(d));
   }
 }
