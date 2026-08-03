@@ -1,6 +1,6 @@
 # Vazhikaatti (AI Blind Navigation Assistant)
 
-Vazhikaatti (Malayalam for "Guide") is an intelligent Android mobile application and hardware ecosystem specifically designed to assist visually impaired individuals with independent navigation. It integrates advanced artificial intelligence, Bluetooth Low Energy (BLE) wearables, indoor BLE beacons, and cloud infrastructure to deliver real-time environmental awareness, directional guidance, and safety features.
+Vazhikaatti (Malayalam for "Guide") is an intelligent Android mobile application and hardware ecosystem specifically designed to assist visually impaired individuals with independent navigation. It integrates advanced artificial intelligence, Bluetooth Low Energy (BLE) wearables, and indoor BLE beacons to deliver real-time environmental awareness, directional guidance, and safety features.
 
 ## Key Features
 
@@ -13,8 +13,7 @@ Vazhikaatti (Malayalam for "Guide") is an intelligent Android mobile application
 ## Architecture & Technologies
 
 - **Frontend:** Flutter SDK (Dart)
-- **Backend Services:** Firebase (Firestore, Realtime Database)
-- **Hardware Integrations:** ESP32 Microcontrollers (Wearable + Beacons), HC-SR04 Ultrasonic Sensors, Active Buzzers.
+- **Hardware Integrations:** ESP32 Microcontrollers (Wearable + Beacons), HC-SR04 Ultrasonic Sensors.
 - **Connectivity:** `flutter_blue_plus` for BLE communication.
 
 ## Hardware Setup (ESP32 / Arduino IDE)
@@ -26,7 +25,6 @@ The project includes custom firmware for ESP32 microcontrollers. All hardware co
 The wearable acts as a BLE Server and connects to the HC-SR04 ultrasonic sensor to measure distances.
 - **Microcontroller:** ESP32
 - **Sensor:** HC-SR04 (Trig: Pin 5, Echo: Pin 18)
-- **Feedback:** Active Buzzer (Pin 23)
 
 ### 2. Navigation Beacons (`hardware/beacons/`)
 Stationary ESP32 devices acting as BLE advertisers that the app uses for indoor triangulation/localization. 
@@ -71,7 +69,6 @@ You can find individual firmware for each beacon here:
 - The main application entry point is `lib/main.dart` with routing in `lib/pages/`.
 - Device connection and navigation services are maintained in `lib/services/`.
 - Hardware firmware is managed in `hardware/`.
-- Ensure you have correctly configured Firebase for Android before deploying by replacing `google-services.json` if necessary.
 
 ## License
 
