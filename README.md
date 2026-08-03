@@ -70,6 +70,10 @@ You can find individual firmware for each beacon here:
 - Device connection and navigation services are maintained in `lib/services/`.
 - Hardware firmware is managed in `hardware/`.
 
+## Author
+
+Developed and maintained by **[Pranav Krishna](https://github.com/xPranavKrishna)**.
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
